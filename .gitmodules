@@ -1,0 +1,21 @@
+[submodule "glfw"]
+	path = dependencies/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "vulkan-headers"]
+	path = dependencies/vulkan-headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers
+[submodule "vulkan-tools"]
+	path = dependencies/vulkan-tools
+	url = https://github.com/KhronosGroup/Vulkan-Tools
+[submodule "vulkan-validationlayers"]
+	path = dependencies/vulkan-validationlayers
+	url = https://github.com/KhronosGroup/Vulkan-ValidationLayers
+[submodule "spirv-headers"]
+	path = dependencies/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers
+[submodule "spirv-tools"]
+	path = dependencies/spirv-tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools
+[submodule "robin-hood-hashing"]
+	path = dependencies/robin-hood-hashing
+	url = https://github.com/martinus/robin-hood-hashing

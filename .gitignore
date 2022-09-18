@@ -1,0 +1,5 @@
+build/**
+vkspec.pdf
+waylandheaders
+a Vulkan instance is a high-level construct used to provide Vulkan system-level information
+rimuovere vulkan loader che lo ho aggiunto con fetch content in cmake. vedi se puoi fare cosi anche per altro

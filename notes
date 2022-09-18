@@ -1,0 +1,257 @@
+*** Chapter 1: Getting Started
+
+physical device and device = the physical device is a vulkan capable GPU present in the system, while the device is a software interface to some or all the features, capabilities of the physical device
+
+Queues = queues are the interface between the GPU and the application. A physical device contains 1+ queues, classified in:
+	- Graphics queues
+	- DMA/Transfer queues
+	- Compute queues
+	... (there are 3 more, video encode, video decode, and sparse memory management)
+	each queue can have more than one type. Furthermore, each type of queues comes with its features, such as Presentation Enabled.
+	Queues are to GATHER COMMANDS, working as command buffers, and dispatch them to GPU for processing
+
+Memory Type = Vulkan distinguishes 2 memory types
+	- host memory
+	- device memory
+		such memory can be 
+			- visible to the host
+			- not visible to the host 
+			ie, the GPU reserves some memory to itself only
+
+Command = instruction to the GPU written in a command buffer, divided in 
+	- ACTION COMMANDS = they do something (eg copy a buffer, draw primitives, clear a surface, query/timestamp operation, begin/end subpass operations)
+			All these commands can ALTER FRAMEBUFFER ATTACHMENTS, READ/WRITE MEMORY, WRITE MEMORY POOLS
+	- SET STATE COMMANDS = help to BIND PIPELINES, DESCRIPTOR SETS, and BUFFERS, SET DYNAMIC STATE, RENDER A PASS/SUBPASS STATE
+	- SYNCHRONIZATION COMMANDS = help you to achieve mutual exclusion over resources, insert barriers where there are memory dependencies (PIPELINE BARRIER), and manage rendering pass/subpass dependencies
+
+** The Fundamentals
+* Vulkan Execution model
+the application first creates the instance and device, then creates a presentation surface, then creates the swapchain and pipeline, and creates command buffers(which are created once and then reused as expensive to 
+create. You can build them in multithreading to speed up). Once created, they can be submitted to a queue for processing and return the result.
+
+The app is responsible for
+	- Preparation steps (prepare resources, precompiling shaders, attaching resources to shaders, specify RENDER STATES, build pipelines, and draw calls)
+	- Memory management
+	- Synchronization between the host and the device
+	- Synchronization between the different queues on the device
+	- HAZARD management (hazards are problems with the instruction pipeline in CPU microarchitectures when the next instruction cannot execute in the following clock cycle, and can potentially lead to incorrect computation results. 		Three common types of hazards are data hazards, structural hazards, and control hazards (branching hazards))
+
+* Vulkan's Queues
+The command buffers can be submitted to ONE QUEUE or MULTIPLE QUEUES. In the latter case, processing is faster, but requires SYNCHRONIZATION, and Vulkan gives us instruments to deal with synchronization:
+	- Semaphores, used to provide a coarse-grained synchronization between queus or commands in a single queue
+	- Events, for fine-grained synchronization
+	- Fences, for synchronization between the host and the device
+	- Pipeline Barriers, an instruction (SYNCHRONIZATION COMMAND) which ensures that commands before the barrier must be executed before executing the ones after the barrier 
+	  (GPUs and CPUs, to speed up execution, mix instruction order in a "random" fashion)
+
+* The OBJECT MODEL
+Everything graphics related in Vulkan, FRAMEBUFFERS, devices, queues, command buffers, pipelines, ... are called VULKAN OBJECTS. They are NOT DIRECTLY ACCESSABLE BY APPLICATION, but managed with opaque HANDLERS and functions 
+(like in the Win32 Api). Handlers can be of 2 types
+	- DISPATCHABLE HANDLE = a POINTER to a Vulkan Object, which has fields accessed with getter functions, and has an associated DISPATCHABLE TYPE that is used to pass as a parameter in the API command.
+		(VkInstance, VkCommandBuffer, VkPhysicalDevice, VkDevice, VkQueue)
+	- NON DISPATCHABLE HANDLE = a 64-BIT INTEGER which either contains the information itself or is a POINTER to a structure
+		(VkSemaphore VkFence VkQueryPool VkBufferView VkDeviceMemory VkBuffer VkImage VkImageView VkPipeline VkPipelineCache VkCommandPool VkPipelineLayout 
+		 VkShaderModule VkSampler VkRenderPass VkDescriptorPool VkDescriptorSet VkDescriptorSetLayout VkFramebuffer VkEvent)
+
+* Object Lifetime and Command Syntax <-----------------------------------------------------------------------------------------------------------------------------------------
+
+Vulkan Objects are CREATED sometimes AND when created, they need to be DESTROYED, as creation=memory allocation, deletion=memory deallocation.
+	- CREATE SYNTAX = vkCreate[entity] which takes a Vk[entity]CreateInfo struct as parameter
+	- DESTROY SYNTAX = vkDestroy[entity]
+
+Objects created as PART OF AN EXISTING OBJECT POOL have different syntax
+	- ALLOCATE SYNTAX = vkAllocate[entity] which takes a VK[entity]AllocateInfo struct as parameter
+	- DEALLOCATE SYNTAX = vkDeallocate[entity]
+
+* Error Checking and Validation
+
+to get performance validation is by default turned off and provided as third party. VALIDATION LAYERS can be enabled, exploiting vulkan layered architecture, by checking only the layers that you need (both debugging and validation layers)
+
+** Understanding the Vulkan Application
+
+* Driver
+the HW vendor supplies the driver for a given vulkan specification for their gpu architecture, and it acts as a bridge between the app and the device
+
+* Application
+
+Once app is initialized, it detects the vulkan layer and loads all the vulkan API (we need to find the api, like what glad does for OpenGL). Then, The PRESENTATION LAYER is initialized with vulkan's WINDOW SYSTEM
+INTEGRATION (WSI). 
+
+The app creates resources and BINDS them to shaders through DESCRIPTORS. the descriptor set layout is the bridge between the created descriptor set (a bundle of resources linked to shaders) and the pipeline object, created on a 
+graphics|compute queue. 
+
+Then, command buffers are recorded and submitted to the queues for processing
+
+* Various other notes
+
+SPIR-V = precompiled intermediate format, a shader program interpreted by vulkan (interpreted because vulkan translates it into GPU arch. dependent instructions)
+LunarG SDK = useful tools to download and use when developing a Vulkan app, including docs, demos, validation layers, SPIR-V tools,...
+
+** Getting Started with the Vulkan Programming Model
+
+	- Hardware Initialization
+	- Windowing Presentation Surface
+	- Resource Setup
+	- Pipeline Setup
+		- Descriptor and Descriptor Pool
+		- Shaders with SPIR-V
+		- Pipeline State Management
+	- Command Recordings
+	- Submission of commands
+
+* Hardware initialization
+
+it means communicate with a LOADER (a piece of code) that knows where vulkan drivers are in the system. Such Vulkan Loader is PLATFORM INDEPENDENT
+
+Once the loader locates the vulkan API, the application
+	- creates a VULKAN INSTANCE
+	- queries the PHYSICAL DEVICE for the available QUEUES
+	- queries the PHYSICAL DEVICE for EXTENTIONS and STORE the ones you use as FUNCTION POINTERS, like WSI (a Khronos extension, in fact all types contain "KHR")
+	- enable VALIDATION LAYERS for error checking, debugging, ....
+
+* Windowing Presentation Surface
+
+once vulkan finishes computing the image|frame we want to display it to a Platform specific window. WSI extension defines an almost cross platform way achieve this. Such extension supports Wayland, X, Windows
+
+WSI anso manages the ownership of images via a SWAPCHAIN. As an example, we can create a swapchain to hold 2 images 
+	(DOUBLE BUFFERING = 2 framebuffers. one of these contains a finished image, and is being displayed to the screen. Say the other image is also ready. When the monitor finishes drawing the first image, there will be a very
+			short period of time, called VERTICAL BLANK INTERVAL, in which the display will do nothing. In this instant, we "switch" the image being sent to the monitor, "front buffer", with the other one we were keeping,
+			"back buffer". While the 2nd image is being drawn by the monitor, we have time to compute the next image and write the back buffer, since is not being "displayed")
+so when an app works on the first image, WSI gives the second one to display its contents. Once the app finishes drawing second image, it SUBMITS it to WSI and ACQUIRE the first one.
+
+Of course, there are preparation tasks to setup WSI
+	- create a window with the native API
+	- create a WSI SURFACE attached to the window
+	- create the SWAPCHAIN present in the SURFACE
+	- request the DRAWING IMAGES from the created swapchain
+
+* Resource Setup
+
+it means store data in memory. (data = vertex attributes,uniforms,...). vulkan exposes the types of available memory on the device. memory heaps are categorized into basically FAST and SLOW memory, more formally
+	- host local = slower, because this is system memory. You are basically saying to the gpu to fetch data from main memory
+		- visible to both host and device
+	- device local = faster, as it has an higher bandwidth and resides in the gpu itself
+		- device local, host visible
+		- device local, not host visible
+
+how does it work: 
+	once the resources are created, we get back a number, a unique identifier called "logical address" for the object just created. THE OBJECT DOESN'T YET HAVE A PHYSICAL LOCATION IN MEMORY
+	the app ALLOCATES memory and BINDS logical addresses to memory regions. Since allocation is expansive, SUBALLOCATION is more efficient. It means allocate a big chunk first, and then give portions of that chunk
+	to the resources you create (in a "page aware" way, see slab allocation or pool allocation) 
+
+	for very large objects, we can use SPARSE ALLOCATION, useful for eg HD EXR textures. It consists in BREAK THE IMAGE IN TILES, and LOAD IN MEMORY THE TILE YOU NEED.
+	
+* Pipeline Setup
+
+a pipeline is a job subduvided in steps where the output of one step is used as input of the next. Such events are
+	- supply the shaders
+	- bind them to their resources through descriptor sets
+	- manage the state of the pipeline itself
+
+A DESCRIPTOR SET is an interface between the resources and shaders, needed as shaders would otherwise see just a stream of bytes in host|device memory. We need to let the GPU know the FORMAT of our data. 
+The descriptor set      - changes frequently
+			- is allocated from a DESCRIPTOR POOL
+			- can be used and modified in multiple threads, which is critical to achieve performance, and therefore we DEFINE A LOGICAL PARTITIONING OF DESCRIPTOR SETS ASSOCIATED WITH A SCENE
+				- Scene descriptor sets (low frequency updates)
+				- Model descriptor sets (medium frequency updates)
+				- Draw Level descriptor sets (high frequency updates)
+
+Shaders have to be supplied to vulkan in SPIR-V format, which is produced by a compiler provided by LunarG SDK, which accepts as input both GLSL and HLSL. this means that SHADERS ARE COMPILED OFFLINE. The shader object in SPIR-V
+also provides multiple entry points, reducing its size
+
+Pipeline State Management = a Physical Device contains hardware settings that determine how the input data of a given geometry needs to be interpreted and drawn. Such settings are known as PIPELINE STATES.
+	examples = rasterizer state, blend state, depth stencil state, primitive topology type (point/line/triangle).
+Pipeline States can be STATIC or DYNAMIC, and are used to CREATE PIPELINE OBJECTS, which can be GRAPHICS PIPELINE OBJECTS or  COMPUTE PIPELINE OBJECTS. Creation is expensive, therefore, created once, used many times.
+
+The app controls pipeline states with PIPELINE CACHE OBJECTS(PCO) and PIPELINE LAYOUT.
+	- pipeline objects creation includes shaders recompilation (SPIR-V -> GPU arch. specific), resource binding, render pass, framebuffer management, ... 
+		in a complex app they are 100s or 1000s
+	- PCO are caches which contain the recently created/requested pipelines. So pipelines once created can be caches. 
+		useful might be to cache a base pipeline and customize it to provide variety.
+		PCO are opaque objects, driver specific. The app needs to STORE IT if we want to reuse it again and again
+	- Pipeline layout describes the DESCRIPTOR SETS used in the pipeline, which indicates which objects will each shader use and which kind. Different pipeline objects can use the same layout
+
+* Recording Commands
+
+	- Start recording
+		- Render Pass
+		- Pipeline
+		- Bind Resource
+		- Viewport
+		- Scissor
+		- Draw
+	- End recording
+(this up here is a command buffer, and each indented item is a command)
+
+Recording commands is the process of COMMAND BUFFER CREATION, ALLOCATED from the COMMAND POOL, in memory. A command buffer is recorded by supplying commands within a given START and END scope defined by the application
+(similiar to immediate mode gui). Commands vary of course depending on the nature of the job we need the GPU to do.
+The major steps of drawing: Scope, Render Pass, Pipeline, Descriptor, Bind Resource, Viewport, Scissor, Drawing
+	- Scope = defines start and end of the command buffer recording
+	- Render Pass = job that affects the framebuffer cache. It can have ATTACHMENTS and be subdivided is SUBPASSES. at the beginning of each subpass we can also decide to keep the previous framebuffer content or clear it.
+	- Pipeline = States, Static or Dynamic, manipulated through pipeline objects
+	- Descriptor = Bind resources to the pipeline (format)
+	- Bind resource = specify the resources
+	- Viewport = specify section of the Surface on which rendering will be performed
+	- Drawing = specify GEOMETRY BUFFER attributes: start index, count, ...
+Command buffer recording is usually, as pipeline setup, done with multiple threads, each manipulating its Command Buffer Pool, to avoid synchronization issues and data races.
+
+Once the command buffer is built, it is ready to be SUBMITTED TO A QUEUE. the family to select is job specific. Jobs are then executed asynchronously
+we can also push command buffers to multiple queues for parallel execution. APP IS RESPONSIBLE FOR SYNCHRONIZATION within a command buffer in a single queue, and between multiple queues.
+Queue submission steps
+	- Acquire image from the swapchain interacting with WSI
+	- Deploy synchronization mechanisms (eg. fences, semaphores, events, pipeline barriers)
+	- Gather command buffers and SUBMIT them to the queues for processing
+	- request PRESENTATION of the completed frame on the monitor through WSI
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+*** Vulkan's Hello World
+
+** Installing Vulkan
+vulkan driver, python, cmake, LunarG SDK. install them 
+		
+
+The vulkan initialization step starts with the VkInstance creation. Once the istance is created, we check the Physical devices vulkan capable in the system. Choose one of them and then create a VkDevice, logical view of the 
+physical device.
+
+Vulkan provides validation layers through instance extensions. Speaking of which, there are 2 types of extensions	
+	- INSTANCE-SPECIFIC EXTENSIONS: global-level extensions
+	- DEVICE-SPECIFIC EXTENSIONS: physical-device-specific extensions
+therefore we 
+	1> communicate with loader and locate vulkan driver
+	2> see the number of vkEnumerateInstanceLayerProperties to retrieve layers and properties, which vary from GPU to GPU. We call it twice, first to get number of properties and then to store them
+		this is for valitation layers, but we can do the same with vkEnumerateInstanceExtensionProperties. SEE COMMON FORMAT VKENUMERATE{OBJECT}{THING}PROPERTIES
+		and for each layer of instance layer, we get the extensions		
+	3> then we use vkCreateInstance 
+	4> vkEnumeratePhysicalDevices()
+once we got the physical devices, we need to query some information through vkEnumerateDeviceExtensionProperties, and we also need information for
+	- QUEUE AND QUEUE PROPERTIES vkGetPhysicalDeviceQueeuFamilyProperties, search for all the queue families in use (surely Presentation and Graphics) and STORE THE INDEX
+	- MEMORY INFORMATION vkGetPhysicalDeviceMemoryProperties retrieves available memory types usable on the GPU
+	- PHYSICAL DEVICE PROPERTIES vkGetPhysicalDeviceProperties OPTIONAL step to retrieve gpu specific information which can be used in subsequent logic
+
+Then we need to create the device, using vkCreateDevice
+
+** Swapchain initialization - querying the WSI extension
+
+create an OS specific/window display API specific window (glfw)
+These apis need to be dynamically linked and stored as function pointer in the application. You should use vkGetInstanceProcAddr() to query for their presence, but the LunarG SDK takes care of it for us
+
+1> we need to create the VkSurfaceKHR object, which abstracts the native platform created with vkCreate[Win32|Wayland|X|Android]SurfaceKHR, or glfwCreateVkSurface or something
+2> search for a graphic queue capable of PRESENTATION vkGetPhysicalDeviceSurfaceSupportKHR (for the specified queue)
+3> get a compatible queue vkGetDeviceQueue to specify the handle or index of the compatible queue that we have already queried in the last step
+4> Query the surface formats
+	retrieve all the advertised surface formats that are supported by the physical device with vkGetPhysicalDeviceSurfaceFormatsKHR API
+
+** Command Buffer initialization
+
+We need COMMAND BUFFERS. their initialization requires
+	- COMMAND POOL CREATIION we will use the graphic queue index in vkCreateCommandPool
+	- ALLOCATE A COMMAND BUFFER with vkAllocateCommandBuffers
+
+** RESOURCE OBJECTS - MANAGING IMAGES AND BUFFERS
+Vulkan has 2 types of resources: IMAGES and BUFFERS
+	- BUffer a linear array, VkBuffer created with vkCreateBuffer
+		- BUFFER VIEW: VkBufferView specifies the FORMAT with which to interpret the buffer, with vkCreateBufferView, which in its create info accepts properties like the VkBuffer itself, the format,
+				the range, ...
+	- IMAGE VkImage, stores [123]D arrays, created with the vkCreateImage
+		- IMAGE VIEW: VkImageView created with the vkCreateImageView along with the VkImageViewCreateInfo.
+the application does not consume the VkBuffer and VkImage directly, but it consumes their views
