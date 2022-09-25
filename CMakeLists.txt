@@ -4,12 +4,21 @@ add_executable(VulkanLearning ${PROJECT_SOURCE_DIR}/src/main.cpp)
 
 target_compile_features(VulkanLearning PUBLIC cxx_std_20)
 
+message("Hello world!")
+
 # ---required setup for GLFW--- #
 
 # turn off docs, tests, examples compilation
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+# force GLFW to use wayland instead of X in linux
+if(UNIX AND NOT APPLE AND NOT CYGWIN)
+	set(GLFW_BUILD_WAYLAND 1)
+	set(GLFW_BUILD_X11 0)
+	set(GLFW_USE_WAYLAND 1)
+endif()
 
 # ---setup for vulkan related repositories--- #
 # setting up spirv headers for vulkan validation layers
