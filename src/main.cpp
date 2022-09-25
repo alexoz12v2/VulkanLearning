@@ -56,18 +56,16 @@ namespace mxc
 #ifndef NDEBUG //CMAKE_BUILD_TYPE=Debug
 					 m_dbg_msger(nullptr),
 #endif // ifndef NDEBUG	
-					 m_registered_exts(nullptr), m_registered_ext_count(0u), m_registered_ext_capacity(0u),
-					 m_registered_ext_buffer(nullptr), m_progress_status(0u) {} 
+					 m_progress_status(0u) {} 
 		~renderer();
 		
 	public: // public functions, initialization procedures
 		auto init() & -> status_t;
-		auto setup_instance() & -> status_t;
+		auto setup_instance(uint32_t const ext_count, char const** ext_names) & -> status_t;
 		auto setup_phy_device() & -> status_t;
 		auto setup_device() & -> status_t;
 
 	public: // public function, utilities
-		auto register_extension(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t;
 		auto progress_incomplete() const & -> status_t; // TODO: const correct and ref correct members
 												  
 	private: // data members, dispatchable vulkan objects handles
@@ -93,12 +91,26 @@ namespace mxc
 #endif // ifndef NDEBUG
 
 	private: // data members, utilities_queues.idx.graphics = 
-		// TODO I don't want to hold onto extensions forever. When can they be destroyed? move them
-		// TODO change this array in a form of contiguous binary tree, to guarantee uniqueness
-		char** m_registered_exts;
-		uint32_t m_registered_ext_count;
-		uint32_t m_registered_ext_capacity;
-		char(* m_registered_ext_buffer)[VK_MAX_EXTENSION_NAME_SIZE]; // VK_MAX_EXTENSION_NAME_SIZE = 256u
+		class extensions_configurator
+		{
+		public: 
+			extensions_configurator(): m_registered_exts(nullptr), m_registered_ext_count(0u), m_registered_ext_capacity(0u),
+					 				   m_registered_ext_buffer(nullptr) {}
+			~extensions_configurator();
+
+		public:
+			auto register_extensions(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t;
+			auto init() & -> status_t;
+
+		public:
+			// TODO I don't want to hold onto extensions forever. When can they be destroyed? move them
+			// TODO change this array in a form of contiguous binary tree, to guarantee uniqueness
+			char** m_registered_exts;
+			uint32_t m_registered_ext_count;
+			uint32_t m_registered_ext_capacity;
+			char(* m_registered_ext_buffer)[VK_MAX_EXTENSION_NAME_SIZE]; // VK_MAX_EXTENSION_NAME_SIZE = 256u
+		};
+
 		uint32_t m_progress_status; // BIT FIELD: {initialized?, instance created?, ...}
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 		#define MXC_RENDERER_PROGRESS_UNUSED_BITS 0x1fffffff
@@ -124,6 +136,13 @@ namespace mxc
 
 	auto renderer::init() & -> status_t
 	{
+	
+		m_progress_status |= m_progress_t::INITIALIZED;
+		return APP_SUCCESS;
+	}
+
+	auto renderer::extensions_configurator::init() & -> status_t
+	{
 		// allocate initial buffer to store up to 32 supported extensions
 		void* memory_needed = malloc(32u * (sizeof(char[VK_MAX_EXTENSION_NAME_SIZE]) + sizeof(char*)));
 		if (!memory_needed)
@@ -134,9 +153,16 @@ namespace mxc
 		m_registered_ext_buffer = static_cast<char(*)[VK_MAX_EXTENSION_NAME_SIZE]>(memory_needed);
 		m_registered_exts = static_cast<char**>(memory_needed + 32u * sizeof(char[VK_MAX_EXTENSION_NAME_SIZE]));
 		m_registered_ext_capacity = 32u;
-		
-		m_progress_status |= m_progress_t::INITIALIZED;
-		return APP_SUCCESS;
+
+		return APP_SUCCESS;	
+	}
+
+	renderer::extensions_configurator::~extensions_configurator()
+	{
+		if (m_registered_ext_buffer)
+		{
+			free(m_registered_ext_buffer); // don't free m_registered_exts too cause it's only 1 buffer
+		}
 	}
 
 	renderer::~renderer()
@@ -161,15 +187,14 @@ namespace mxc
 #endif // ifndef NDEBUG
 			case m_progress_t::INITIALIZED | m_progress_t::INSTANCE_CREATED:
 				vkDestroyInstance(m_instance, /*VkAllocationCallbacks*/nullptr);
-			case m_progress_t::INITIALIZED:
-				free(m_registered_ext_buffer); // don't free m_registered_exts too cause it's only 1 buffer
+			// case m_progress_t::INITIALIZED:
 		}
 	}
 	
 	// TODO this has to be modified when implementing a binary tree and custom allocations with
 	// suballocation
 	// TODO assumes in_ext_names are UNIQUE
-	auto renderer::register_extension(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t
+	auto renderer::extensions_configurator::register_extensions(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t
 	{
 		// check if given extensions are actually supported by our vulkan instance
 		uint32_t extension_cnt;
@@ -294,7 +319,7 @@ namespace mxc
 
 #endif // ifndef NDEBUG
 	
-	auto renderer::setup_instance() & -> status_t
+	auto renderer::setup_instance(uint32_t const ext_count, char const** ext_names) & -> status_t
 	{
      	// find supported version of vulkan
 		uint32_t supported_vk_api_version;
@@ -305,7 +330,15 @@ namespace mxc
        		fprintf(stderr, "system does not support vulkan 1.2 or higher!");
 			return APP_LACK_OF_VULKAN_1_2_SUPPORT_ERR;
        	}
-	
+
+		extensions_configurator instance_exts;
+		if (status_t status = instance_exts.init(); status != APP_SUCCESS)
+		{
+			return status;
+		}
+
+		instance_exts.register_extensions(ext_count, ext_names);
+
 		// create the Vkinstance TODO will be modified to include validation layers
 		VkApplicationInfo const application_info = {
 			.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -326,7 +359,7 @@ namespace mxc
 		// by default validation layers output to the standard output, which can be customized and altered by setting a MESSAGE CALLBACK
 		// thanks to the extension VK_EXT_DEBUG_UTILS_EXTENSION_NAME, macro which resolves to "VK_EXT_debug_utils" TODO
 		char const* msg_callback_ext_name = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-		if (register_extension(1u, &msg_callback_ext_name))
+		if (instance_exts.register_extensions(1u, &msg_callback_ext_name))
 		{
 			return APP_GENERIC_ERR;
 		}
@@ -408,8 +441,8 @@ namespace mxc
 			.enabledLayerCount = 0u,
 			.ppEnabledLayerNames = nullptr,
 			#endif
-			.enabledExtensionCount = m_registered_ext_count,
-			.ppEnabledExtensionNames = m_registered_exts // TODO will change when data structure changes
+			.enabledExtensionCount = instance_exts.m_registered_ext_count,
+			.ppEnabledExtensionNames = instance_exts.m_registered_exts // TODO will change when data structure changes
 		};
 
 		#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
@@ -417,15 +450,11 @@ namespace mxc
 		FILE* const dbg_ext_layers_names_fd = fopen("./ext_and_layers_names.txt", "w");
 		if (dbg_ext_layers_names_fd)
 		{
-			printf("debug file created!\n");
+			printf("instance extensions and layers debug file created!\n");
 			fprintf(dbg_ext_layers_names_fd, "extensions:\n");
-			if (m_registered_exts)
+			for (uint32_t i = 0u; i < instance_exts.m_registered_ext_count; ++i)
 			{
-				fprintf(stderr, "extensions not empty! May cause segmentation fault\n");
-			}
-			for (uint32_t i = 0u; i < m_registered_ext_count; ++i)
-			{
-				fprintf(dbg_ext_layers_names_fd, "%s\n", m_registered_exts[i]);
+				fprintf(dbg_ext_layers_names_fd, "%s\n", instance_exts.m_registered_exts[i]);
 			}
 			fprintf(dbg_ext_layers_names_fd, "validation layers:\n");
 			for (uint32_t i = 0u; i < enabled_layers_cnt; ++i)
@@ -805,8 +834,8 @@ namespace mxc
 		 * if you don't need any additional extension other than those required by GLFW, then you can pass this pointer directly to ppEnabledExtensions in VkInstanceCreateInfo.
 		 * Assuming we could need more in the future, I will store them as state by a dynamically allocated buffer in the renderer
 		 */
-		if (m_renderer.register_extension(required_instance_glfwextension_count, required_instance_glfwextensions)
-			|| m_renderer.setup_instance()
+		
+		if (m_renderer.setup_instance(required_instance_glfwextension_count, required_instance_glfwextensions)
 			|| m_renderer.setup_phy_device()
 			|| m_renderer.setup_device())
 		{
