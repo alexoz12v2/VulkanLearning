@@ -1,8 +1,16 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24.3)
 project(VulkanLearning)
 add_executable(VulkanLearning ${PROJECT_SOURCE_DIR}/src/main.cpp)
 
 target_compile_features(VulkanLearning PUBLIC cxx_std_20)
+# set some basic compiler options
+if (MSVC)
+    # warning level 4 and all warnings as errors
+    add_compile_options(/W4) #/WX)
+else()
+    # lots of warnings and all warnings as errors
+    add_compile_options(-Wall)# -Wextra -pedantic -Werror) writing Werror like this will treat warnings coming from dependencies as errors, we want to use the CMAKE_COMPILE_WARNING_AS_ERROR variable, TODO later
+endif()
 
 message("Hello world!")
 
@@ -15,9 +23,9 @@ set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 # force GLFW to use wayland instead of X in linux
 if(UNIX AND NOT APPLE AND NOT CYGWIN)
-	set(GLFW_BUILD_WAYLAND 1)
-	set(GLFW_BUILD_X11 0)
-	set(GLFW_USE_WAYLAND 1)
+#	set(GLFW_BUILD_WAYLAND 1)
+	set(GLFW_BUILD_X11 1)
+#	set(GLFW_USE_WAYLAND 1)
 endif()
 
 # ---setup for vulkan related repositories--- #
@@ -34,13 +42,11 @@ set(robin_hood_DIR "${PROJECT_SOURCE_DIR}/dependencies/robin-hood-hashing")
 set(RH_STANDALONE_PROJECT OFF)
 # vulkan validation layer tests require more, but I won't use them
 
-set(LD_LIBRARY_PATH "${PROJECT_BINARY_DIR}/build/loader")
-
 target_include_directories(VulkanLearning PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/glfw/include"
-					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/vulkan-headers/include"
-					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/robin-hood-hashing/src/include"
-				          PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-headers/include"
-					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-tools/include")
+						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/vulkan-headers/include"
+						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/robin-hood-hashing/src/include"
+				    	PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-headers/include"
+						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-tools/include")
 add_subdirectory(
 	${PROJECT_SOURCE_DIR}/dependencies/glfw/
 )
@@ -65,6 +71,7 @@ include(FetchContent)
 FetchContent_Declare(
 	Vulkan-Loader
 	GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Loader.git
+	GIT_TAG 09afdf64210b11ec653a1001e013b5af4fce8559 # sdk-1.3.224.0
 )
 FetchContent_MakeAvailable(Vulkan-Loader)
 
