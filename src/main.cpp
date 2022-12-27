@@ -8,10 +8,10 @@
 #include <cstring>
 #include <cassert>
 
-// possibly change to use filesystem
 #include <filesystem>
 #include <fstream>
-#include <vector> // TODO remove
+#include <string_view>
+#include <vector>
 
 // TODO change naming convention from snake_case to camelCase for vars and PascalCase for types
 // TODO register_extensions and setupInstance manage a lot of memory, and they should have allocated
@@ -66,8 +66,8 @@ namespace mxc
 		~renderer();
 		
 	public: // public functions, initialization procedures
-		auto init(uint32_t const ext_count, char const** ext_names, GLFWwindow* window) & -> status_t; // TODO init arguments refactored in a customizeable struct
-		auto setupInstance(uint32_t const ext_count, char const** ext_names) & -> status_t;
+		auto init(std::vector<char const*> const& desiredInstanceExtensions, GLFWwindow* window) & -> status_t; // TODO init arguments refactored in a customizeable struct
+		auto setupInstance(std::vector<char const*> const& desiredExtensions) & -> status_t;
 		auto setupSurfaceKHR(GLFWwindow* window) & -> status_t; // TODO refactor
 		auto setupPhyDevice() & -> status_t;
 		auto setupDeviceAndQueues() & -> status_t;
@@ -154,27 +154,6 @@ namespace mxc
 		uint32_t m_progressStatus;
 
 	private: // data members, utilities
-		class extensions_configurator
-		{
-		public: 
-			extensions_configurator(): m_registered_exts(nullptr), m_registered_ext_count(0u), m_registered_ext_capacity(0u),
-					 				   m_registered_ext_buffer(nullptr) {}
-			~extensions_configurator();
-
-		public:
-			auto register_extensions(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t;
-			auto init() & -> status_t;
-
-		public:
-			// TODO I don't want to hold onto extensions forever. When can they be destroyed? move them
-			// TODO change this array in a form of contiguous binary tree, to guarantee uniqueness
-			char** m_registered_exts;
-			uint32_t m_registered_ext_count;
-			uint32_t m_registered_ext_capacity;
-			char(* m_registered_ext_buffer)[VK_MAX_EXTENSION_NAME_SIZE]; // VK_MAX_EXTENSION_NAME_SIZE = 256u
-		};
-
-		// the enum class is a fully fledged type. All we need are scoped aliases for numbers and to perform bitwise operations
 		enum m_Progress_t : uint32_t
 		{
 			INITIALIZED = 0x80000000,
@@ -198,6 +177,9 @@ namespace mxc
 		};
 	
 	private: // functions, utilities
+		#ifndef NDEBUG
+		auto dbgPrintInstanceExtensionsAndLayers(std::vector<char const*> const& instanceExtensions, std::vector<char const*> const& layers) -> void;
+		#endif
 	};
 
 	renderer::renderer() 
@@ -216,9 +198,9 @@ namespace mxc
 	{
 	}				
 
-	auto renderer::init(uint32_t const ext_count, char const** ext_names, GLFWwindow* window) & -> status_t
+	auto renderer::init(std::vector<char const*> const& desiredInstanceExtensions, GLFWwindow* window) & -> status_t
 	{
-		if (setupInstance(ext_count, ext_names)
+		if (setupInstance(desiredInstanceExtensions)
 			|| setupSurfaceKHR(window)
 			|| setupPhyDevice()
 			|| setupDeviceAndQueues()
@@ -236,30 +218,6 @@ namespace mxc
 
 		m_progressStatus |= m_Progress_t::INITIALIZED;
 		return APP_SUCCESS;
-	}
-
-	auto renderer::extensions_configurator::init() & -> status_t
-	{
-		// allocate initial buffer to store up to 32 supported extensions
-		void* memory_needed = malloc(32u * (sizeof(char[VK_MAX_EXTENSION_NAME_SIZE]) + sizeof(char*)));
-		if (!memory_needed)
-		{
-			return APP_MEMORY_ERR;
-		}
-
-		m_registered_ext_buffer = static_cast<char(*)[VK_MAX_EXTENSION_NAME_SIZE]>(memory_needed);
-		m_registered_exts = reinterpret_cast<char**>(reinterpret_cast<unsigned char*>(memory_needed) + 32u * sizeof(char[VK_MAX_EXTENSION_NAME_SIZE])); // TODO change to std::byte
-		m_registered_ext_capacity = 32u;
-
-		return APP_SUCCESS;	
-	}
-
-	renderer::extensions_configurator::~extensions_configurator()
-	{
-		if (m_registered_ext_buffer)
-		{
-			free(m_registered_ext_buffer); // don't free m_registered_exts too cause it's only 1 buffer
-		}
 	}
 
 	renderer::~renderer()
@@ -364,102 +322,14 @@ namespace mxc
 		}
 #endif
 
-		if (m_progressStatus & (INITIALIZED | INSTANCE_CREATED))
+		if (m_progressStatus & INSTANCE_CREATED)
 		{
 			vkDestroyInstance(m_instance, /*VkAllocationCallbacks*/nullptr);
 		}
 		printf("destroyed renderer!\n");
 	}
 	
-	// TODO this has to be modified when implementing a binary tree and custom allocations with
-	// suballocation
-	// TODO assumes in_ext_names are UNIQUE
-	// TODO DISTINGUISH BETWEEN INSTANCE EXTENSIONS AND DEVICE EXTENSIONS _------------------------------------------=-=-=-=--0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-
-	auto renderer::extensions_configurator::register_extensions(uint32_t const in_ext_count, char const** in_ext_names) & -> status_t
-	{
-		// check if given extensions are actually supported by our vulkan instance
-		uint32_t extension_cnt;
-		vkEnumerateInstanceExtensionProperties(
-			nullptr,        // const char* pLayerName
-			&extension_cnt,
-			nullptr         // VkExtensionProperties* pProperties 
-		);
-
-		auto* const ext_properties_buf = static_cast<VkExtensionProperties*>(malloc(extension_cnt * (sizeof(VkExtensionProperties) + sizeof(uint32_t))));
-		if (!ext_properties_buf)
-		{
-			return APP_MEMORY_ERR;
-		}
-		vkEnumerateInstanceExtensionProperties(nullptr, &extension_cnt, ext_properties_buf);
-
-		uint32_t* const ext_supported_indices = 
-				static_cast<uint32_t*>(static_cast<void*>(ext_properties_buf + extension_cnt));
-		uint32_t ext_supported_indices_cnt = 0u;
-		// TODO rework this step
-		uint32_t* current_empty_index = ext_supported_indices;
-		for (uint32_t i = 0u; i < in_ext_count; ++i)
-		{
-			for (uint32_t j = 0u; j < extension_cnt; ++j)
-			{
-				if (0 == strncmp(in_ext_names[i], ext_properties_buf[j].extensionName, VK_MAX_EXTENSION_NAME_SIZE))
-				{
-					*current_empty_index++ = i;
-					++ext_supported_indices_cnt;
-					break;
-				}
-			}
-		}
-
-		// allocate more registered extension names if buffer is not big enough
-		if (ext_supported_indices_cnt + m_registered_ext_count > m_registered_ext_capacity)
-		{
-			void* tmp_buf = malloc(2u * m_registered_ext_capacity * (sizeof(char[VK_MAX_EXTENSION_NAME_SIZE]) + sizeof(char*)));
-			if (!tmp_buf)
-			{
-				free(ext_properties_buf);
-				return APP_MEMORY_ERR;
-			}
-			
-			memcpy(tmp_buf, 
-				   m_registered_ext_buffer,
-				   sizeof(char[VK_MAX_EXTENSION_NAME_SIZE])*m_registered_ext_count);
-			void* old = m_registered_ext_buffer;
-			m_registered_ext_buffer = static_cast<char(*)[VK_MAX_EXTENSION_NAME_SIZE]>(tmp_buf);
-
-			memcpy(m_registered_ext_buffer + m_registered_ext_capacity*2u,
-				   m_registered_exts,
-				   sizeof(char*)*m_registered_ext_count);
-			m_registered_exts = reinterpret_cast<char**>(reinterpret_cast<unsigned char*>(tmp_buf) + sizeof(char[VK_MAX_EXTENSION_NAME_SIZE])*m_registered_ext_capacity*2u); // TODO unsigned char could be changed to std::byte
-
-			free(old);
-			m_registered_ext_capacity *= 2u;
-		}
-		// names could also NOT be stored contiguously in the format specified by the class
-		// therefore we need to copy them one by one, by checking each character for the nul terminator
-		// (i.e. using strcpy)
-		uint32_t registered_ext_count_working_copy = m_registered_ext_count;
-		for (uint32_t i = 0u; i < ext_supported_indices_cnt; ++i)
-		{
-			char* cpy_address = reinterpret_cast<char*>((m_registered_ext_buffer + registered_ext_count_working_copy++));
-			strncpy(cpy_address, in_ext_names[i], VK_MAX_EXTENSION_NAME_SIZE);
-			
-			// now setup pointers in m_registered_exts
-			uint32_t j = i + m_registered_ext_count;
-			m_registered_exts[j] = cpy_address;
-		}
-
-		m_registered_ext_count = registered_ext_count_working_copy;
-
-		free(ext_properties_buf);
-		printf("about to print the content of m_registered_ext\n");
-		for (uint32_t i = 0u; i < m_registered_ext_count; ++i)
-		{
-			printf("%s\n", m_registered_exts[i]);
-		}
-		printf("total extensions: %u\n", m_registered_ext_count);
-		return APP_SUCCESS;
-	}
-
+	//
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug TODO
 	// by default, Vulkan's validation layers print all their output to the STDOUT. we can decide to handle the report of validation layers
 	// ourselves by defining a function callback with format predefined by the specification, ONLY AFTER enabling the extension "VK_EXT_debug_utils"
@@ -497,61 +367,77 @@ namespace mxc
 		return VK_FALSE;
 	}
 
-
-#endif // ifndef NDEBUG
-	
-	auto renderer::setupInstance(uint32_t const ext_count, char const** ext_names) & -> status_t
+	auto renderer::dbgPrintInstanceExtensionsAndLayers(std::vector<char const*> const& instanceExtensions, std::vector<char const*> const& layers) -> void
 	{
-     	// find supported version of vulkan
+		FILE* const file = fopen("./ext_and_layers_names.txt", "w");
+		if (file)
+		{
+			fprintf(file, "extensions:\n");
+			for (uint32_t i = 0u; i < instanceExtensions.size(); ++i)
+			{
+				fprintf(file, "%s\n", instanceExtensions[i]);
+			}
+			fprintf(file, "validation layers:\n");
+			for (uint32_t i = 0u; i < layers.size(); ++i)
+			{
+				fprintf(file, "%s\n", layers[i]);
+			}
+			fclose(file);
+			printf("instance extensions and layers debug file created!\n");
+		}
+		else
+		{
+			printf("no debug file could be created!");
+		}
+	}
+#endif // ifndef NDEBUG
+
+	auto renderer::setupInstance(std::vector<char const*> const& desiredInstanceExtensions) & -> status_t
+	{
+     	// -- Check for vulkan 1.2 support ------------------------------------------------------------------
 		uint32_t supported_vk_api_version;
-    	vkEnumerateInstanceVersion(&supported_vk_api_version);	
+		vkEnumerateInstanceVersion(&supported_vk_api_version);	
        	if (supported_vk_api_version < VK_MAKE_API_VERSION(/*variant*/0,/*major*/1,/*minor*/2,/*patch*/0))
-       	{
+		{
 			// TODO substitute with a primitive logging with pretty printing, enabled only in Debug
        		fprintf(stderr, "system does not support vulkan 1.2 or higher!");
 			return APP_LACK_OF_VULKAN_1_2_SUPPORT_ERR;
-       	}
+    	}
 
-		extensions_configurator instance_exts;
-		if (status_t status = instance_exts.init(); status != APP_SUCCESS)
+		// -- Check for desired instance extensions support ---------------------------------------------------
+		uint32_t extensionPropertyCnt;
+		vkEnumerateInstanceExtensionProperties(/*layer*/nullptr, &extensionPropertyCnt, nullptr);
+		std::vector<VkExtensionProperties> extensionProperties(extensionPropertyCnt);
+		vkEnumerateInstanceExtensionProperties(nullptr, &extensionPropertyCnt, extensionProperties.data());
+
+		for (uint32_t i = 0; i < desiredInstanceExtensions.size(); ++i)
 		{
-			return status;
+			uint32_t j = 0;
+			for (; j < extensionPropertyCnt; ++j)
+			{
+				if (strcmp(desiredInstanceExtensions[i], extensionProperties[j].extensionName) == 0)
+				{
+					break;
+				}
+			}
+			if (j == desiredInstanceExtensions.size())
+			{
+				fprintf(stderr, "couldn't find extension %s\n", extensionProperties[i].extensionName);
+				return APP_GENERIC_ERR;
+			}
 		}
 
-		instance_exts.register_extensions(ext_count, ext_names);
-
-		// create the Vkinstance TODO will be modified to include validation layers
-		VkApplicationInfo const application_info = {
-			.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-			.pNext = nullptr,
-			.pApplicationName = "my first vulkan app",
-			.applicationVersion = 1u,
-			.pEngineName = "my first vulkan app",
-			.engineVersion = 1u,
-			.apiVersion = VK_MAKE_API_VERSION(/*variant*/0,/*major*/1,/*minor*/2,/*patch*/0) // the only useful thing here
+		// -- setup validation layers and messenger ---------------------------------------------------------------------------------------------------------
+		std::vector<char const*> desiredValidationLayers {
+			"VK_LAYER_KHRONOS_validation"
 		};
+		uint32_t enabledLayerCnt = 0u;
+		VkDebugUtilsMessengerCreateInfoEXT const* dbgMsgerPtr = nullptr;
 
-		// extensions required by glfw and other extensions are registered by m_registered_ext_buffer
-		// while layers are queried here with the use of the NDEBUF macro, which is set by cmake in 
-		// a release build
-		// TODO rework this section so that debug and release code are fully separated, even if redundant
 		#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-		
-		// by default validation layers output to the standard output, which can be customized and altered by setting a MESSAGE CALLBACK
-		// thanks to the extension VK_EXT_DEBUG_UTILS_EXTENSION_NAME, macro which resolves to "VK_EXT_debug_utils" TODO
-		char const* msg_callback_ext_name = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-		if (instance_exts.register_extensions(1u, &msg_callback_ext_name))
-		{
-			return APP_GENERIC_ERR;
-		}
 
-		// "DEBUG CALLBACK": managed through a Vulkan Object Handle, of type VkDebugUtilsMessengerEXT, which should live as long as the vulkan
-		// app requires to use vulkan with validation layers, therefore it is added as a member to our renderer class
-		// NOTE: the extension specs shows more ways to setup a VkDebugUtilsMessengerEXT
-		// NOTE: put "before instance creation even though to create a VkDebugUtilsMessengerEXT we require an instance" because to test the
-		// 		 instance itself with a messenger, we need to pass in the VkInstanceCreateInfo.pNext a pointer to the dbg_msger_create_info,
-		// 		 which will trigger the automatic creation and destruction of another VkDebugUtilsMessengerEXT
-		VkDebugUtilsMessengerCreateInfoEXT const dbg_msger_create_info = {
+		// create info for the debug messenger, passed first as extension to the instance create info and then used to create msger
+		VkDebugUtilsMessengerCreateInfoEXT const dbgMsgerCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
 			.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT
 							 | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
@@ -563,159 +449,81 @@ namespace mxc
 			.pfnUserCallback = debugCallback,									// select which function to use as callback
 			.pUserData = nullptr												// selects user data to pass as 4th param to the callback. OPTIONAL
 		};
+		dbgMsgerPtr = &dbgMsgerCreateInfo;
 	
-		// desired validation layers, which then are checked against vkEnumerateInstanceLayerProperties to see if they are supported
-		char const* const desired_validation_layers[] = {
-			"VK_LAYER_KHRONOS_validation"
-		};
-		uint32_t const desired_validation_layers_cnt = sizeof(desired_validation_layers)/sizeof(char*);
+		// check desired validation layers for support
+		uint32_t layerPropertyCnt;
+		vkEnumerateInstanceLayerProperties(&layerPropertyCnt, nullptr);
+		std::vector<VkLayerProperties> layerProperties(layerPropertyCnt);
+		vkEnumerateInstanceLayerProperties(&layerPropertyCnt, layerProperties.data());
 
-		uint32_t layer_properties_cnt;
-		vkEnumerateInstanceLayerProperties(&layer_properties_cnt, /*VkLayerProperties* props*/nullptr);
-		
-		// TODO: abstract details of memory
-		// TODO change this to a struct of 2 arrays, which is essentially what I am creating here
-		// allocating contiguous buffer which stores layer_properties, layer names in a flat contiguous format, and pointers to each string
-		VkLayerProperties* const layer_properties = 
-				static_cast<VkLayerProperties*>(malloc(layer_properties_cnt * (sizeof(VkLayerProperties) + sizeof(char*))));
-		if (!layer_properties)
+		for (uint32_t i = 0u; i < desiredValidationLayers.size(); ++i)
 		{
-			return APP_MEMORY_ERR;
-		}
-
-		vkEnumerateInstanceLayerProperties(&layer_properties_cnt, layer_properties);
-
-		// since vulkan requires an array of pointers, traverse our contiguous structure to setup pointers
-		char const** enabled_layers = reinterpret_cast<decltype(enabled_layers)>(layer_properties + layer_properties_cnt); // TODO this is just bad code
-		uint32_t enabled_layers_cnt = 0u;
-		for (uint32_t i = 0u; i < desired_validation_layers_cnt; ++i)
-		{
-			for (uint32_t j = 0u; j < layer_properties_cnt; ++j)
+			for (uint32_t j = 0u; j < layerPropertyCnt; ++j)
 			{
-				if (0 == strncmp(layer_properties[j].layerName, desired_validation_layers[i], VK_MAX_EXTENSION_NAME_SIZE))
+				if (0 == strncmp(layerProperties[j].layerName, desiredValidationLayers[i], VK_MAX_EXTENSION_NAME_SIZE))
 				{
-					enabled_layers[i] = layer_properties[j].layerName;
-					++enabled_layers_cnt;
+					++enabledLayerCnt;
 					break;
 				}
 			}
 		}
-		if (enabled_layers_cnt == 0u)
+		if (enabledLayerCnt == 0u)
 		{
-			enabled_layers = nullptr;
 			fprintf(stderr, "no layers were available!\n");
 		}
 
 		#endif // ifndef NDEBUG
-		
-		VkInstanceCreateInfo const instance_create_info{
-			.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-			.pNext = &dbg_msger_create_info,
-#elif
+	
+		// -- create the vulkan instance --------------------------------------------------------------------------------------------------
+		VkApplicationInfo const applicationInfo = {
+			.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 			.pNext = nullptr,
-#endif // ifndef NDEBUG
-			// Bitmask on some options that define the BEHAVIOUR OF THE INSTANCE
-			.flags = 0x00000000,
-			.pApplicationInfo = &application_info,
-			#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-			.enabledLayerCount = enabled_layers_cnt, // enabling ALL layers for now TODO
-			.ppEnabledLayerNames = enabled_layers,
-			#elif // CMAKE_BUILD_TYPE=Release
-			.enabledLayerCount = 0u,
-			.ppEnabledLayerNames = nullptr,
-			#endif
-			.enabledExtensionCount = instance_exts.m_registered_ext_count,
-			.ppEnabledExtensionNames = instance_exts.m_registered_exts // TODO will change when data structure changes
+			.pApplicationName = "my first vulkan app",
+			.applicationVersion = 1u,
+			.pEngineName = "my first vulkan app",
+			.engineVersion = 1u,
+			.apiVersion = VK_MAKE_API_VERSION(/*variant*/0,/*major*/1,/*minor*/2,/*patch*/0) // the only useful thing here
 		};
 
-		#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
+		VkInstanceCreateInfo const instanceCreateInfo{
+			.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+			.pNext = dbgMsgerPtr,
+			.flags = 0, // Bitmask on some options that define the BEHAVIOUR OF THE INSTANCE
+			.pApplicationInfo = &applicationInfo,
+			.enabledLayerCount = enabledLayerCnt, // enabling ALL layers for now TODO
+			.ppEnabledLayerNames = desiredValidationLayers.data(),
+			.enabledExtensionCount = static_cast<uint32_t>(desiredInstanceExtensions.size()),
+			.ppEnabledExtensionNames = desiredInstanceExtensions.data()
+		};
 
-		FILE* const dbg_ext_layers_names_fd = fopen("./ext_and_layers_names.txt", "w");
-		if (dbg_ext_layers_names_fd)
+		VkResult result = vkCreateInstance(&instanceCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_instance);
+		if (result != VK_SUCCESS)
 		{
-			printf("instance extensions and layers debug file created!\n");
-			fprintf(dbg_ext_layers_names_fd, "extensions:\n");
-			for (uint32_t i = 0u; i < instance_exts.m_registered_ext_count; ++i)
-			{
-				fprintf(dbg_ext_layers_names_fd, "%s\n", instance_exts.m_registered_exts[i]);
-			}
-			fprintf(dbg_ext_layers_names_fd, "validation layers:\n");
-			for (uint32_t i = 0u; i < enabled_layers_cnt; ++i)
-			{
-				fprintf(dbg_ext_layers_names_fd, "%s\n", enabled_layers[i]);
-			}
-			fclose(dbg_ext_layers_names_fd);
-		}
-		else
-		{
-			printf("no debug file could be created!");
-		}
-
-		#endif // ifndef NDEBUG
-
-		VkResult const instance_creation_result = vkCreateInstance(&instance_create_info, /*VkAllocationCallbacks**/nullptr, &m_instance);
-
-		#ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-		for (uint32_t i = 0u; i < enabled_layers_cnt; ++i)
-		{
-			printf("what is this, layer %u is \"%s\"\n", i, enabled_layers[i]);
-		}
-		free(layer_properties);
-		#endif // ifndef NDEBUG
-		
-		if (instance_creation_result != VK_SUCCESS)
-		{
-			fprintf(stderr, "instance creation result:\n");
-			switch (instance_creation_result)
-			{
-				case VK_ERROR_OUT_OF_HOST_MEMORY:
-					fprintf(stderr, "VK_ERROR_OUT_OF_HOST_MEMORY\n");
-					break;
-				case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-					fprintf(stderr, "VK_ERROR_OUT_OF_DEVICE_MEMORY\n");
-					break;
-				case VK_ERROR_INITIALIZATION_FAILED:
-					fprintf(stderr, "VK_ERROR_INITIALIZATION_FAILED\n");
-					break;
-				case VK_ERROR_LAYER_NOT_PRESENT:
-					fprintf(stderr, "VK_ERROR_LAYER_NOT_PRESENT\n");
-					break;
-				case VK_ERROR_EXTENSION_NOT_PRESENT:
-					fprintf(stderr, "VK_ERROR_EXTENSION_NOT_PRESENT\n");
-					break;
-				case VK_ERROR_INCOMPATIBLE_DRIVER:
-					fprintf(stderr, "VK_ERROR_INCOMPATIBLE_DRIVER\n");
-					break;
-			}
+			fprintf(stderr, "failed to create an instance!\n");
 			return APP_GENERIC_ERR;
 		}
 
-		m_progressStatus |= m_Progress_t::INSTANCE_CREATED;
+		m_progressStatus |= INSTANCE_CREATED;
 		printf("instance created!\n");
 
+		// -- create debug messenger --------------------------------------------------------------------------------------
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-		// "DEBUG CALLBACK": managed through a Vulkan Object Handle, of type VkDebugUtilsMessengerEXT, which should live as long as the vulkan
-		// app requires to use vulkan with validation layers, therefore it is added as a member to our renderer class
-		// NOTE: the extension specs shows more ways to setup a VkDebugUtilsMessengerEXT
-
-		/** function signature for the creation of a VkDebugUtilsMessengerEXT TODO move messenger creation after instance
-		 * VkResult vkCreateDebugUtilsMessageEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT*, conts VkAllocationCallbacks*, VkDebugUtilsMessengerEXT* out_param)
-		 * "BUT since this is an extension function, it is not automatically loaded and we need to call vkGetInstanceProcAddr(insance, funcname) ourselves" 
-		 */
+		// since this is an extension function, it is not automatically loaded and we need to call vkGetInstanceProcAddr(insance, funcname) ourselves
 		auto const vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
 		if (!vkCreateDebugUtilsMessengerEXT)
 		{
 			return VK_ERROR_EXTENSION_NOT_PRESENT;
 		}
 
-		if (vkCreateDebugUtilsMessengerEXT(m_instance, &dbg_msger_create_info, /*VkAllocationCallbacks**/nullptr, &m_dbgMessenger) != VK_SUCCESS)
+		result = vkCreateDebugUtilsMessengerEXT(m_instance, &dbgMsgerCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_dbgMessenger);
+		if (result != VK_SUCCESS)
 		{
 			return APP_GENERIC_ERR;
 		}
 
 		m_progressStatus |= MESSENGER_CREATED;
-
+		dbgPrintInstanceExtensionsAndLayers(desiredInstanceExtensions, desiredValidationLayers);
 #endif // ifndef NDEBUG	
 		return APP_SUCCESS;
 	}
@@ -1770,7 +1578,7 @@ namespace mxc
 		// -- VkPipelineDynamicStateCreateInfo defines which properties of the pipeline state objects are dynamic and can be changed after the pipeline's creation. TODO set it up for resizeable screen. Can be null
 		VkPipelineDynamicStateCreateInfo const graphicsPipelineDynamicStateCI {
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-			.pNext = nullptr,// no exts here for now 
+			.pNext = nullptr,// no exts here for now Constructs the container with count
 			.flags = 0, // no flags here for now
 			.dynamicStateCount = 0, // TODO setup framebuffer/surface/viewport/scissor size to be dynamic so that the window is resizeable
 			.pDynamicStates = nullptr
@@ -2043,19 +1851,7 @@ namespace mxc
 
 		// window and vulkan initialization
 		auto init() -> status_t;
-		// TODO
-		auto presentation_setup_step() -> status_t;
-		// TODO
-		auto resource_setup_step() -> status_t;
-		// TODO
-		auto pipeline_setup_step() -> status_t;
-		// TODO
-		auto descriptorsets_setup_step() -> status_t;
-		// TODO
-		auto spirv_shaders_step() -> status_t;
-		// TODO
-		auto record_commands_step() -> status_t;
-		
+	
 		// application execution
 		// NOTE: IT CONTROLS IF ALL USED BITS IN PROGRESS ARE SET, if you add some, change this
 		auto run() -> status_t;
@@ -2173,53 +1969,30 @@ namespace mxc
 		 * the "current context", example when swapping buffers. Since we are using Vulkan, we'll do none of that and instead use the KHR extension WSI, to interface with the windowing system
 		 */
 		/*** instance support and physical device presentation support and creation ***/
-		uint32_t required_instance_glfwextension_count;
-		char const** required_instance_glfwextensions = glfwGetRequiredInstanceExtensions(&required_instance_glfwextension_count);
+		uint32_t glfwInstanceExtensionCnt;
+		char const** glfwInstanceExtensions = glfwGetRequiredInstanceExtensions(&glfwInstanceExtensionCnt);
 		/**NOTE:
 		 * if you don't need any additional extension other than those required by GLFW, then you can pass this pointer directly to ppEnabledExtensions in VkInstanceCreateInfo.
 		 * Assuming we could need more in the future, I will store them as state by a dynamically allocated buffer in the renderer
 		 */
+		std::vector<char const*> desiredInstanceExtensions;
+		desiredInstanceExtensions.reserve(glfwInstanceExtensionCnt + 1);
+		for (uint32_t i = 0; i < glfwInstanceExtensionCnt; ++i)
+		{
+			desiredInstanceExtensions.emplace_back(glfwInstanceExtensions[i]);
+		}
+		#ifndef NDEBUG
+		desiredInstanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+		#endif
 
-		if (m_renderer.init(required_instance_glfwextension_count, required_instance_glfwextensions, m_window) == APP_GENERIC_ERR)
+		if (m_renderer.init(desiredInstanceExtensions, m_window) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}
 
 		// TODO add app initialized status when finish everything
 		return APP_SUCCESS;
-	}
-		
-	auto app::presentation_setup_step() -> status_t
-	{
-		status_t result = APP_GENERIC_ERR;
-		// assuming the initialization_step was run, TODO add macros, then we can setup our VkSurface and swapchain 
-		return result;
-	}
-
-	auto app::resource_setup_step() -> status_t 
-	{
-		return APP_GENERIC_ERR;	
-	}
-
-	auto app::pipeline_setup_step() -> status_t 
-	{
-		return APP_GENERIC_ERR;
-	}
-	
-	auto app::descriptorsets_setup_step() -> status_t 
-	{
-		return APP_GENERIC_ERR;
-	}
-	
-	auto app::spirv_shaders_step() -> status_t 
-	{
-		return APP_GENERIC_ERR;
-	}
-	
-	auto app::record_commands_step() -> status_t 
-	{
-		return APP_GENERIC_ERR;
-	}
+	}	
 
 	auto app::progress_incomplete() -> status_t
 	{
