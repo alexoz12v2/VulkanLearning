@@ -8,11 +8,21 @@
 #include <cstring>
 #include <cassert>
 
-#include <filesystem>
-#include <fstream>
-#include <string_view>
+#include <filesystem> // path
+#include <fstream> // ifstream
+#include <string_view> // unused yet
 #include <vector>
+#include <span> // unused yet
+#include <unordered_set>
+#include <algorithm> // copy
 
+// here just for the copied allocator
+#include <new>
+#include <limits>
+#include <iostream>
+
+// TODO IMPORTANT BUG: when opened from executable the game doesn't lauch. Thats because the build doesn't contain the compiled shaders. 
+//		Either change current directory or at build copy shader folders (only .spv files)
 // TODO change naming convention from snake_case to camelCase for vars and PascalCase for types
 // TODO register_extensions and setupInstance manage a lot of memory, and they should have allocated
 // 		void* in the beginning as working buffers, instead of allocating on demand, therefore reducing
@@ -25,7 +35,44 @@
 // TODO custom allocation
 // TODO once you write a user-defined constructor, syntesized move constructor and move assignment operators are disabled by default. Write them
 // TODO -fno-exceptions
+// TODO write allocator, example from cppreference
+template<typename T>
+struct Mallocator
+{
+    using value_type = T;
+	constexpr Mallocator() = default;
+    template<class U>
+    constexpr Mallocator (const Mallocator <U>&) noexcept {}
+    [[nodiscard]] T* allocate(std::size_t n)
+    {
+        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
+            throw std::bad_array_new_length();
+        if (auto p = static_cast<T*>(std::malloc(n * sizeof(T))))
+        {
+            report(p, n);
+            return p;
+        }
+        throw std::bad_alloc();
+    }
+    void deallocate(T* p, std::size_t n) noexcept
+    {
+        report(p, n, 0);
+        std::free(p);
+    }
+private:
+    void report(T* p, std::size_t n, bool alloc = true) const
+    {
+        std::cout << (alloc ? "Alloc: " : "Dealloc: ") << sizeof(T) * n
+                  << " bytes at " << std::hex << std::showbase
+                  << reinterpret_cast<void*>(p) << std::dec << '\n';
+    }
+};
 
+template<class T, class U>
+bool operator==(const Mallocator <T>&, const Mallocator <U>&) { return true; }
+
+template<class T, class U>
+bool operator!=(const Mallocator <T>&, const Mallocator <U>&) { return false; }
 // NOTE: glfwGetGammaRamp to get the monitor's gamma
 // NOTE: to get started more "smoothly", I WILL NOT DO CUSTOM ALLOCATION IN THIS MOCK APPLICATION
 // 		 subsequent Vulkan trainings will include more as I learn from scratch graphics development
@@ -56,8 +103,13 @@ namespace mxc
 	// 		specific status report
 	/*** WARNING: most of the functions will return APP_TRUE if successful, and APP_FALSE if unsuccessful ***/
 
+	template <template<class> class AllocTemplate = std::allocator>
 	class renderer
 	{
+	public: // type shortcuts
+		template <typename T>
+		using VectorCustom = std::vector<T, AllocTemplate<T>>;
+
 	public: // constructors
 		renderer();
 		renderer(renderer const&) = delete;
@@ -66,11 +118,14 @@ namespace mxc
 		~renderer();
 		
 	public: // public functions, initialization procedures
-		auto init(std::vector<char const*> const& desiredInstanceExtensions, GLFWwindow* window) & -> status_t; // TODO init arguments refactored in a customizeable struct
-		auto setupInstance(std::vector<char const*> const& desiredExtensions) & -> status_t;
+		// TODO refactor so that you take a raw array. it is too restrictive to constraint api caller to use a specific class data structure
+		auto init(std::span<char const*> desiredInstanceExtensions, 
+				  std::span<char const*> desiredDeviceExtensions, 
+				  GLFWwindow* window) & -> status_t; // TODO init arguments refactored in a customizeable struct
+		auto setupInstance(std::span<char const*> const& desiredExtensions) & -> status_t;
 		auto setupSurfaceKHR(GLFWwindow* window) & -> status_t; // TODO refactor
-		auto setupPhyDevice() & -> status_t;
-		auto setupDeviceAndQueues() & -> status_t;
+		auto setupPhyDevice(std::span<char const*> const& desiredDeviceExtensions) -> status_t;
+		auto setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t;
 		auto setupSwapchain() & -> status_t;
 		auto setupCommandBuffers() & -> status_t;
 		// auto setupStagingBuffer() & -> status_t;
@@ -109,7 +164,7 @@ namespace mxc
 		VkQueue m_queues[MXC_RENDERER_QUEUES_COUNT];
 
 		VkCommandPool m_graphicsCmdPool;	//cmdPools can also be trimmed or reset
-		std::vector<VkCommandBuffer> m_graphicsCmdBufs; // these two are created/allocated for the m_queueIdx.graphics queue
+		VectorCustom<VkCommandBuffer> m_graphicsCmdBufs; // these two are created/allocated for the m_queueIdx.graphics queue
 
 		VkRenderPass m_renderPass;
 		// color output attachment and depth output attachment
@@ -118,16 +173,16 @@ namespace mxc
 		//VkImageView m_depthImageView;
 		//VkDeviceMemory m_depthImageMemory;
 
-		std::vector<VkFramebuffer> m_framebuffers; // triple buffering
+		VectorCustom<VkFramebuffer> m_framebuffers; // triple buffering
 			
 		#define MXC_RENDERER_SHADERS_COUNT 2
 		VkPipeline m_graphicsPipeline;
 		VkPipelineLayout m_graphicsPipelineLayout;
 
-		std::vector<VkFence> m_fenceInFlightFrame;
+		VectorCustom<VkFence> m_fenceInFlightFrame;
 		// we are using triple buffering, so at least 2 pairs of semaphores should be created, to be safe we will associate a pair of semaphores to each framebuffer
-		std::vector<VkSemaphore> m_semaphoreImageAvailable;
-		std::vector<VkSemaphore> m_semaphoreRenderFinished;
+		VectorCustom<VkSemaphore> m_semaphoreImageAvailable;
+		VectorCustom<VkSemaphore> m_semaphoreRenderFinished;
 
 		// presentation WSI extension
 		VkSurfaceKHR m_surface;
@@ -178,16 +233,16 @@ namespace mxc
 	
 	private: // functions, utilities
 		#ifndef NDEBUG
-		auto dbgPrintInstanceExtensionsAndLayers(std::vector<char const*> const& instanceExtensions, std::vector<char const*> const& layers) -> void;
+		auto dbgPrintInstanceExtensionsAndLayers(std::span<const char*> const& instanceExtensions, std::span<char const*> const& layers) -> void;
 		#endif
 	};
 
-	renderer::renderer() 
+	template <template<class> class AllocTemplate> renderer<AllocTemplate>::renderer() 
 			: m_instance(VK_NULL_HANDLE), m_phyDevice(VK_NULL_HANDLE), m_device(VK_NULL_HANDLE)
 			, m_queueIdxArr{-1}, m_queues{VK_NULL_HANDLE} // TODO Don't forget to update m_queueIdxArr when adding queue types
-			, m_graphicsCmdPool(VK_NULL_HANDLE), m_graphicsCmdBufs(std::vector<VkCommandBuffer>(0)), m_renderPass(VK_NULL_HANDLE)
-			, m_framebuffers(std::vector<VkFramebuffer>(0)), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
-			, m_fenceInFlightFrame(std::vector<VkFence>(0)), m_semaphoreImageAvailable(std::vector<VkSemaphore>(0)), m_semaphoreRenderFinished(std::vector<VkSemaphore>(0))//, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
+			, m_graphicsCmdPool(VK_NULL_HANDLE), m_graphicsCmdBufs(VectorCustom<VkCommandBuffer>(0)), m_renderPass(VK_NULL_HANDLE)
+			, m_framebuffers(VectorCustom<VkFramebuffer>(0)), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
+			, m_fenceInFlightFrame(VectorCustom<VkFence>(0)), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>(0)), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>(0))//, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
 			, /*m_depthImageMemory(VK_NULL_HANDLE),*/ m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
 			, m_swapchain(VK_NULL_HANDLE), m_pSwapchainImages(nullptr), m_pSwapchainImageViews(nullptr), m_swapchainImagesCnt(0)
 			, m_surfaceExtent(VkExtent2D{0,0})//, m_depthImageFormat(VK_FORMAT_D32_SFLOAT)
@@ -198,12 +253,15 @@ namespace mxc
 	{
 	}				
 
-	auto renderer::init(std::vector<char const*> const& desiredInstanceExtensions, GLFWwindow* window) & -> status_t
+	template <template<class> class AllocTemplate> 
+	auto renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
+									   std::span<char const*> desiredDeviceExtensions,
+									   GLFWwindow* window) & -> status_t
 	{
 		if (setupInstance(desiredInstanceExtensions)
-			|| setupSurfaceKHR(window)
-			|| setupPhyDevice()
-			|| setupDeviceAndQueues()
+			|| setupSurfaceKHR(window) // TODO work in progress, refactor to another class, like "rendererWindowAdaptor" to make renderer and window loosely coupled
+			|| setupPhyDevice(desiredDeviceExtensions)
+			|| setupDeviceAndQueues(desiredDeviceExtensions)
 			|| setupSwapchain()
 			|| setupCommandBuffers()
 			//|| setupDepthImage()
@@ -216,11 +274,12 @@ namespace mxc
 			return APP_GENERIC_ERR;
 		}
 
-		m_progressStatus |= m_Progress_t::INITIALIZED;
+		m_progressStatus |= INITIALIZED;
 		return APP_SUCCESS;
 	}
 
-	renderer::~renderer()
+	template <template<class> class AllocTemplate> 
+	renderer<AllocTemplate>::~renderer()
 	{
 		printf("time to destroy renderer!\n");
 		// wait until the device is idle to clean resources so we don't break anything with VkFences
@@ -229,34 +288,22 @@ namespace mxc
 			vkDeviceWaitIdle(m_device);
 		}
 
-		// Then we can clean everything up
-		if (m_progressStatus & SYNCHRONIZATION_OBJECTS_CREATED)
+		// Then we can clean everything up. Note that we do not check for successful initialization. That's because
+		// the vkDestroy and vkDeallocate functions can be called when the handle to be destroyed/freed is VK_NULL_HANDLE 
+		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
 		{
-			for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
-			{
-				vkDestroyFence(m_device, m_fenceInFlightFrame[i], /*VkAllocationCallbacks**/nullptr);
-				vkDestroySemaphore(m_device, m_semaphoreImageAvailable[i], /*VkAllocationCallbacks**/nullptr);
-				vkDestroySemaphore(m_device, m_semaphoreRenderFinished[i], /*VkAllocationCallbacks**/nullptr);
-			}
+			vkDestroyFence(m_device, m_fenceInFlightFrame[i], /*VkAllocationCallbacks**/nullptr);
+			vkDestroySemaphore(m_device, m_semaphoreImageAvailable[i], /*VkAllocationCallbacks**/nullptr);
+			vkDestroySemaphore(m_device, m_semaphoreRenderFinished[i], /*VkAllocationCallbacks**/nullptr);
 		}
 
-		if (m_progressStatus & GRAPHICS_PIPELINE_CREATED)
-		{
-			vkDestroyPipeline(m_device, m_graphicsPipeline, /*VkAllocationCallbacks**/nullptr);
-		}
+		vkDestroyPipeline(m_device, m_graphicsPipeline, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
 
-		if (m_progressStatus & GRAPHICS_PIPELINE_LAYOUT_CREATED)
+		// TODO vkDestroyFramebuffer times 3, then free memory 
+		for (uint32_t i = 0; i < m_swapchainImagesCnt; ++i)
 		{
-			vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
-		}
-
-		if (m_progressStatus & FRAMEBUFFERS_CREATED)
-		{
-			// TODO vkDestroyFramebuffer times 3, then free memory 
-			for (uint32_t i = 0; i < m_swapchainImagesCnt; ++i)
-			{
-				vkDestroyFramebuffer(m_device, m_framebuffers[i], /*VkAllocationCallbacks**/nullptr);
-			}
+			vkDestroyFramebuffer(m_device, m_framebuffers[i], /*VkAllocationCallbacks**/nullptr);
 		}
 		
 		//if (m_progressStatus & DEPTH_MEMORY_ALLOCATED)
@@ -270,62 +317,37 @@ namespace mxc
 		//	vkDestroyImageView(m_device, m_depthImageView, /*VkAllocationCallbacks**/nullptr);
 		//	vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
 		//}
-		
-		if (m_progressStatus & RENDERPASS_CREATED)
+	
+		vkDestroyRenderPass(m_device, m_renderPass, /*VkAllocationCallbacks**/nullptr);
+	
+		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, m_swapchainImagesCnt, m_graphicsCmdBufs.data());
+		vkDestroyCommandPool(m_device, m_graphicsCmdPool, /*VkAllocationCallbacks**/nullptr);
+
+		// frees both swapchain images and images views, they share the memory buffer
+		free(m_pSwapchainImages);
+
+		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
 		{
-			vkDestroyRenderPass(m_device, m_renderPass, /*VkAllocationCallbacks**/nullptr);
-		}
-		
-		if (m_progressStatus & COMMAND_BUFFER_ALLOCATED)
-		{
-			vkFreeCommandBuffers(m_device, m_graphicsCmdPool, m_swapchainImagesCnt, m_graphicsCmdBufs.data());
-			vkDestroyCommandPool(m_device, m_graphicsCmdPool, /*VkAllocationCallbacks**/nullptr);
+			vkDestroyImageView(m_device, m_pSwapchainImageViews[i], /*VkAllocationCallback**/nullptr);
 		}
 
-		if (m_progressStatus & SWAPCHAIN_IMAGE_VIEWS_CREATED)
-		{
-			// frees both swapchain images and images views, they share the memory buffer
-			free(m_pSwapchainImages);
+		vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr);
+		vkDestroySurfaceKHR(m_instance, m_surface, /*VkAllocationCallbacks**/nullptr);
 
-			for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
-			{
-				vkDestroyImageView(m_device, m_pSwapchainImageViews[i], /*VkAllocationCallback**/nullptr);
-			}
-		}
-
-		if (m_progressStatus & SWAPCHAIN_CREATED)
-		{
-			vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr);
-		}
-
-		if (m_progressStatus & SURFACE_CREATED)
-		{
-			vkDestroySurfaceKHR(m_instance, m_surface, /*VkAllocationCallbacks**/nullptr);
-		}
-
-		if (m_progressStatus & DEVICE_CREATED)
-		{
-			// all its child objects need to be destroyed before doing this
-			vkDestroyDevice(m_device, /*VkAllocationCallbacks**/nullptr);
-		}
+		// all its child objects need to be destroyed before doing this
+		vkDestroyDevice(m_device, /*VkAllocationCallbacks**/nullptr);
 
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
-		if (m_progressStatus & MESSENGER_CREATED)
+		auto const vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+			vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT")
+		);
+		if (vkDestroyDebugUtilsMessengerEXT)
 		{
-			auto const vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
-				vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT")
-			);
-			if (vkDestroyDebugUtilsMessengerEXT)
-			{
-				vkDestroyDebugUtilsMessengerEXT(m_instance, m_dbgMessenger, /*pAllocationCallbacks**/nullptr);
-			}
+			vkDestroyDebugUtilsMessengerEXT(m_instance, m_dbgMessenger, /*pAllocationCallbacks**/nullptr);
 		}
 #endif
 
-		if (m_progressStatus & INSTANCE_CREATED)
-		{
-			vkDestroyInstance(m_instance, /*VkAllocationCallbacks*/nullptr);
-		}
+		vkDestroyInstance(m_instance, /*VkAllocationCallbacks*/nullptr);
 		printf("destroyed renderer!\n");
 	}
 	
@@ -365,9 +387,10 @@ namespace mxc
 		// TODO maybe it's better to put it in a file?
 		fprintf(stderr, "%s\n", pcallback_data->pMessage);
 		return VK_FALSE;
-	}
 
-	auto renderer::dbgPrintInstanceExtensionsAndLayers(std::vector<char const*> const& instanceExtensions, std::vector<char const*> const& layers) -> void
+	}
+	template <template<class> class AllocTemplate> 
+	auto renderer<AllocTemplate>::dbgPrintInstanceExtensionsAndLayers(std::span<char const*> const& instanceExtensions, std::span<char const*> const& layers) -> void
 	{
 		FILE* const file = fopen("./ext_and_layers_names.txt", "w");
 		if (file)
@@ -392,7 +415,8 @@ namespace mxc
 	}
 #endif // ifndef NDEBUG
 
-	auto renderer::setupInstance(std::vector<char const*> const& desiredInstanceExtensions) & -> status_t
+	template <template<class> class AllocTemplate> 
+	auto renderer<AllocTemplate>::setupInstance(std::span<char const*> const& desiredInstanceExtensions) & -> status_t
 	{
      	// -- Check for vulkan 1.2 support ------------------------------------------------------------------
 		uint32_t supported_vk_api_version;
@@ -407,7 +431,7 @@ namespace mxc
 		// -- Check for desired instance extensions support ---------------------------------------------------
 		uint32_t extensionPropertyCnt;
 		vkEnumerateInstanceExtensionProperties(/*layer*/nullptr, &extensionPropertyCnt, nullptr);
-		std::vector<VkExtensionProperties> extensionProperties(extensionPropertyCnt);
+		VectorCustom<VkExtensionProperties> extensionProperties(extensionPropertyCnt);
 		vkEnumerateInstanceExtensionProperties(nullptr, &extensionPropertyCnt, extensionProperties.data());
 
 		for (uint32_t i = 0; i < desiredInstanceExtensions.size(); ++i)
@@ -428,7 +452,7 @@ namespace mxc
 		}
 
 		// -- setup validation layers and messenger ---------------------------------------------------------------------------------------------------------
-		std::vector<char const*> desiredValidationLayers {
+		VectorCustom<char const*> desiredValidationLayers {
 			"VK_LAYER_KHRONOS_validation"
 		};
 		uint32_t enabledLayerCnt = 0u;
@@ -454,7 +478,7 @@ namespace mxc
 		// check desired validation layers for support
 		uint32_t layerPropertyCnt;
 		vkEnumerateInstanceLayerProperties(&layerPropertyCnt, nullptr);
-		std::vector<VkLayerProperties> layerProperties(layerPropertyCnt);
+		VectorCustom<VkLayerProperties> layerProperties(layerPropertyCnt);
 		vkEnumerateInstanceLayerProperties(&layerPropertyCnt, layerProperties.data());
 
 		for (uint32_t i = 0u; i < desiredValidationLayers.size(); ++i)
@@ -528,313 +552,246 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::setupPhyDevice() & -> status_t
+	template <template<class> class AllocTemplate> 
+	auto renderer<AllocTemplate>::setupPhyDevice(std::span<char const*> const& desiredDeviceExtensions) -> status_t
 	{
 		assert(m_progressStatus & INSTANCE_CREATED);
 		assert(m_progressStatus & SURFACE_CREATED);
 
-		// retrieve list of vulkan capable physical devices
-		uint32_t phy_devices_cnt;
-		vkEnumeratePhysicalDevices(m_instance, &phy_devices_cnt, nullptr);
+		// variable used in all enumerate functions present here
+		uint32_t enumerateCounter;
 
-		auto phy_devices = static_cast<VkPhysicalDevice*>(malloc(phy_devices_cnt * sizeof(VkPhysicalDevice)));
-		if (!phy_devices)
-		{
-			return APP_MEMORY_ERR;
-		}
-
-		vkEnumeratePhysicalDevices(m_instance, &phy_devices_cnt, phy_devices);
+		// -- retrieve list of vulkan capable physical devices ----------------------------------------------------------------
+		vkEnumeratePhysicalDevices(m_instance, &enumerateCounter, nullptr);
+		VectorCustom<VkPhysicalDevice> phyDevices(enumerateCounter);
+		vkEnumeratePhysicalDevices(m_instance, &enumerateCounter, phyDevices.data());
 
 		// then you can query the properties of the physical device with vkGetPhysicalDeviceProperties and choose the one
-		// that suits your needs. I understand none of that, therefore I'm going to choose the first available DEDICATED GPU
+		// that suits your needs. I understand none of that, therefore I'm going to choose the first available GPU
 		// you have no idea how many more get properties functions there are.
 		// we will also query the available queue families. for now we need a graphics queue and a presentation enabled queue (WSI)
-		for (uint32_t i = 0u; i < phy_devices_cnt; ++i)
+		for (uint32_t i = 0u; i < phyDevices.size(); ++i)
 		{
-			// query properties
-			VkPhysicalDeviceProperties phy_device_properties;
-			vkGetPhysicalDeviceProperties(phy_devices[i], &phy_device_properties);
-			if (phy_device_properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+			// -- query physical device properties. Most relevant: limits and sparse properties TODO -------------------------------------------------------------------
+			VkPhysicalDeviceProperties phyDeviceProperties;
+			vkGetPhysicalDeviceProperties(phyDevices[i], &phyDeviceProperties);
+			if (phyDeviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
 			{
-				continue;
+				printf("this is not a dedicated GPU!\n");
 			}
 
-			// query features TODO
+			// -- query features TODO ---------------------------------------------------------------------------------------------
 
-			// query available queue families with their associated indices. First query how many there are to allocate a buffer
-			uint32_t queue_family_properties_cnt;
-			vkGetPhysicalDeviceQueueFamilyProperties(phy_devices[i], &queue_family_properties_cnt, nullptr);
-			if (queue_family_properties_cnt == 0u)
+			// -- query available queue families with their associated indices. First query how many there are to allocate a buffer ---------------
 			{
-				continue;
-			}
-
-			auto queue_family_properties = static_cast<VkQueueFamilyProperties*>(malloc(queue_family_properties_cnt * sizeof(VkQueueFamilyProperties)));
-			if (!queue_family_properties)
-			{
-				free(phy_devices);
-				free(queue_family_properties);
-				return APP_MEMORY_ERR;
-			}
-			
-			// get queue family properties to check which queue families are available
-			vkGetPhysicalDeviceQueueFamilyProperties(phy_devices[i], &queue_family_properties_cnt, queue_family_properties);
-			for (uint32_t j = 0u; j < queue_family_properties_cnt; ++j)
-			{
-				if (m_queueIdx.graphics == -1 
-					&& 0 != queue_family_properties->queueFlags & VK_QUEUE_GRAPHICS_BIT) // I care only for very few simple things
+				vkGetPhysicalDeviceQueueFamilyProperties(phyDevices[i], &enumerateCounter, nullptr);
+				if (enumerateCounter == 0u)
 				{
-					m_queueIdx.graphics = j;
+					continue;
 				}
-				
-				// query for the given index presentation support for the given queue family
-				if (m_queueIdx.presentation == -1)
+
+				VectorCustom<VkQueueFamilyProperties> queueFamilyProperties(enumerateCounter);
+				vkGetPhysicalDeviceQueueFamilyProperties(phyDevices[i], &enumerateCounter, queueFamilyProperties.data());
+				for (uint32_t j = 0u; j < queueFamilyProperties.size(); ++j) // TODO refactor this to be more flexible
 				{
-					VkBool32 presentation_supported;
-					vkGetPhysicalDeviceSurfaceSupportKHR(phy_devices[i], /*queue family idx*/j, m_surface, &presentation_supported);
-					if (presentation_supported)
+					if (m_queueIdx.graphics == -1 
+						&& 0 != queueFamilyProperties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
 					{
-						m_queueIdx.presentation = j;
-						break; // TODO move this break when adding more queue types
+						m_queueIdx.graphics = j;
+					}
+					
+					// query for the given index presentation support for the given queue family
+					if (m_queueIdx.presentation == -1)
+					{
+						VkBool32 presentationSupported;
+						vkGetPhysicalDeviceSurfaceSupportKHR(phyDevices[i], /*queue family idx*/j, m_surface, &presentationSupported);
+						if (presentationSupported)
+						{
+							m_queueIdx.presentation = j;
+							break; // TODO move this break when adding more queue types
+						}
 					}
 				}
-			}
 
-			// now check if all necessary queues are present, if not continue with next device 
-			if (m_queueIdx.graphics == -1 || m_queueIdx.presentation == -1)
-			{
-				free(queue_family_properties);
-				continue;
-			}
+				// now check if all necessary queues are present, if not continue with next device 
+				if (bool allQueuesPresent = m_queueIdx.graphics != -1 && m_queueIdx.presentation != -1; 
+					!allQueuesPresent)
+				{
+					continue;
+				}
+			} // vector killed
 
-			// get and store the surface capabilities, an intersection between the display capabilities
-			// and the physical device capabilities regarding presentation. Needed to create a swapchain
-			vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phy_devices[i], m_surface, &m_surfaceCapabilities);
+			// -- get and store the surface capabilities, an intersection between the display capabilities
+			//    and the physical device capabilities regarding presentation. Needed to create a swapchain ----------------------------------------------
+			vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevices[i], m_surface, &m_surfaceCapabilities);
 			
-			// now check for surface format support, we want R8G8B8A8 format, with sRGB nonlinear colorspace. PS=there are more advanced query functions
-			// to check for more specific features, such as specifics about compression support
-			uint32_t surface_format_cnt;
-			vkGetPhysicalDeviceSurfaceFormatsKHR(phy_devices[i], m_surface, &surface_format_cnt, nullptr);
-			if (surface_format_cnt == 0)
+			// -- now check for surface format support, we want R8G8B8A8 format, with sRGB nonlinear colorspace. ------------------------------------------
+			// PS=there are more advanced query function to check for more specific features, 
+			// such as specifics about compression support
 			{
-				free(queue_family_properties);
-				continue;
-			}
+				vkGetPhysicalDeviceSurfaceFormatsKHR(phyDevices[i], m_surface, &enumerateCounter, nullptr);
+				if (enumerateCounter == 0)
+				{
+					continue;
+				}
 	
-			auto surface_formats = static_cast<VkSurfaceFormatKHR*>(malloc(surface_format_cnt * sizeof(VkSurfaceFormatKHR)));
-			if (!surface_formats)
-			{
-				free(queue_family_properties);
-				free(phy_devices);
-				return APP_MEMORY_ERR;
-			}
-
-			vkGetPhysicalDeviceSurfaceFormatsKHR(phy_devices[i], m_surface, &surface_format_cnt, surface_formats);
-			{
+				VectorCustom<VkSurfaceFormatKHR> surfaceFormats(enumerateCounter);
+				vkGetPhysicalDeviceSurfaceFormatsKHR(phyDevices[i], m_surface, &enumerateCounter, surfaceFormats.data());
+	
 				uint32_t i = 0u;
-				for (; i < surface_format_cnt; ++i)
+				for (; i < surfaceFormats.size(); ++i)
 				{
 					// NOTE: format undefined, returned by vkGetPhysicalDeviceSurfaceFormatsKHR means all formats are supported under the associated color space
-					if (surface_formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-						&& (surface_formats[i].format == VK_FORMAT_UNDEFINED || surface_formats[i].format == VK_FORMAT_R8G8B8A8_UNORM || VK_FORMAT_B8G8R8A8_UNORM))
+					if (surfaceFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+						&& (surfaceFormats[i].format == VK_FORMAT_UNDEFINED || surfaceFormats[i].format == VK_FORMAT_R8G8B8A8_UNORM || VK_FORMAT_B8G8R8A8_UNORM))
 					{
-						m_surfaceFormatUsed = surface_formats[i];
+						m_surfaceFormatUsed = surfaceFormats[i];
 						break;
 					}
 				}
-				if (i == surface_format_cnt)
+				if (i == surfaceFormats.size())
 				{
 					// forceful approach
-					// free(queue_family_properties);
-					// free(surface_formats);
 					// continue;
 				
 					// sane approach
-					m_surfaceFormatUsed = surface_formats[0];
+					m_surfaceFormatUsed = surfaceFormats[0];
 				}
-			}
+			} // vector killed
 
-			free(surface_formats);
-
+			// -- choose appropriate presentation mode for the swapchain ----------------------------------------------------------------------------
 			// We want as present mode, ie how images in the swapchain are managed during image
 			// swap, mailbox presentation mode, which means that 1) swapchain will keep the most 
 			// recent image and throw away the older ones 2) images are swapped during the vertical 
 			// blank interval only
-			uint32_t present_mode_cnt;
-			vkGetPhysicalDeviceSurfacePresentModesKHR(phy_devices[i], m_surface, &present_mode_cnt, nullptr);
-			if (present_mode_cnt == 0)
 			{
-				free(queue_family_properties);
-				continue;
-			}
-	
-			auto surface_present_modes = static_cast<VkPresentModeKHR*>(malloc(present_mode_cnt * sizeof(VkPresentModeKHR)));
-			if (!surface_present_modes)
-			{
-				free(queue_family_properties);
-				free(phy_devices);
-				return APP_MEMORY_ERR;
-			}
-			
-			vkGetPhysicalDeviceSurfacePresentModesKHR(phy_devices[i], m_surface, &present_mode_cnt, surface_present_modes);
-			for (uint32_t i = 0u; i < present_mode_cnt; ++i)
-			{
-				if (surface_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR);
+				vkGetPhysicalDeviceSurfacePresentModesKHR(phyDevices[i], m_surface, &enumerateCounter, nullptr);
+				if (enumerateCounter == 0)
 				{
-					m_presentModeUsed = VK_PRESENT_MODE_MAILBOX_KHR;
-					break;
+					continue;
+				}
+	
+				VectorCustom<VkPresentModeKHR> surfacePresentModes(enumerateCounter);
+				vkGetPhysicalDeviceSurfacePresentModesKHR(phyDevices[i], m_surface, &enumerateCounter, surfacePresentModes.data());
+				for (uint32_t i = 0u; i < surfacePresentModes.size(); ++i)
+				{
+					if (surfacePresentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR);
+					{
+						m_presentModeUsed = VK_PRESENT_MODE_MAILBOX_KHR;
+						break;
+					}
+				}
+				// if loop finishes and m_presentModeUsed is not set, its default value 
+				// (set by the renderer class constructor) is VK_PRESENT_MODE_FIFO_KHR
+			}
+			// -- check requested device extension support -------------------------------------------------------------------------------------------------------
+			{
+
+				printf("about to check device extension support on the physical device\n");
+				// then check against actual support of needed extensions for the device
+				vkEnumerateDeviceExtensionProperties(phyDevices[i], nullptr, &enumerateCounter, nullptr);
+				VectorCustom<VkExtensionProperties> supportedDeviceExtensions(enumerateCounter);
+				vkEnumerateDeviceExtensionProperties(phyDevices[i], nullptr, &enumerateCounter, supportedDeviceExtensions.data());
+
+				for (uint32_t i = 0u; i < desiredDeviceExtensions.size(); ++i)
+				{
+					uint32_t j = 0u;
+					for (; j < supportedDeviceExtensions.size(); ++j)
+					{
+						printf("\tchecking for desired device extension %u, on device extension %u\n", i, j);
+						if (0 == strncmp(supportedDeviceExtensions[j].extensionName, desiredDeviceExtensions[i], VK_MAX_EXTENSION_NAME_SIZE))
+						{
+							break;
+						}
+					}
+					if (j == supportedDeviceExtensions.size())
+					{
+						fprintf(stderr, "couldn't find device extension %s\n", desiredDeviceExtensions[i]);
+						return APP_GENERIC_ERR;
+					}
 				}
 			}
-			// if loop finishes and m_presentModeUsed is not set, its default value (set by the renderer class constructor) is VK_PRESENT_MODE_FIFO_KHR
-		
-			free(surface_present_modes);
 
-			// cleanup and assignment
-			free(queue_family_properties);
-			m_phyDevice = phy_devices[i];
-
+			m_phyDevice = phyDevices[i];
 			m_progressStatus |= PHY_DEVICE_GOT;
 			printf("got physical device!\n");
 			break;
 		}
 
-		free(phy_devices);
 		return APP_SUCCESS;
 	}
-
-	auto renderer::setupDeviceAndQueues() & -> status_t
+	
+	template <template<class> class AllocTemplate> 
+	auto renderer<AllocTemplate>::setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t
 	{
 		assert(m_progressStatus & PHY_DEVICE_GOT);
-		// we can also map a device to multiple physical devices, a "device group", physical devices that can access each other's memory. I'don't care
+		// we can also map a device to multiple physical devices, a "device group", 
+		// physical devices that can access each other's memory. I'don't care
 		
 		// TODO it can be refactored in a struct of arrays to be more readable
 		// allocate necessary memory
-		// for each queue family (of which we'll save 1 queue each), store index, priority and device queue create info
-		auto queue_buffer = static_cast<unsigned char*>(malloc(MXC_RENDERER_QUEUES_COUNT * (sizeof(uint32_t) + sizeof(float) + sizeof(VkDeviceQueueCreateInfo))));
-		if (!queue_buffer)
-		{
-			return APP_MEMORY_ERR;
-		}
+		// -- for each queue family (of which we'll save 1 unique queue each), store index, priority and device queue create info -----------------------------------
 
 		// "QUEUES" need to be setup BEFORE setting up the device, as queues are "CREATED ALONGSIDE THE DEVICE"
-		/* for each DISTICT queue we need to create its associated VkDeviceQueueCreateInfo, "BUT", a queue having presentation feature can be the same queue
-		 * we will be using for graphics operation. Therefore we need to create a set of queue indices
-		 * "IMPORTANT NOTE" TODO we might need again this set of queue indices. If that is the case, move this code
-		 */
-		uint32_t* queue_unique_indices = reinterpret_cast<uint32_t*>(queue_buffer);
-		uint32_t queue_unique_indices_cnt = 1u;
-		queue_unique_indices[0] = m_queueIdxArr[0];
-		for (uint32_t i = 1u; i < MXC_RENDERER_QUEUES_COUNT; ++i)
+		// for each DISTICT queue we need to create its associated VkDeviceQueueCreateInfo, 
+		// "BUT", a queue having presentation feature can be the same queue
+		// we will be using for graphics operation. Therefore we need to create a set of queue indices
+		// "IMPORTANT NOTE" TODO we might need again this set of queue indices. If that is the case, move this code
+		VectorCustom<uint32_t> queueUniqueIndices; // TODO it can be optimized, i.e. unique indices can be built up during the creation of queueIdxArr back in setupPhysicalDevice
 		{
-			uint32_t j = 0u;
-			for (; j < queue_unique_indices_cnt; ++j)
-			{
-				if (m_queueIdxArr[i] == queue_unique_indices[j])
-				{
-					break;
-				}
-			}
-
-			if (j == queue_unique_indices_cnt)
-			{
-				queue_unique_indices[j] = m_queueIdxArr[i];
-				++queue_unique_indices_cnt;
-			}
+			// TODO compare construction of unordered_set with unstable_sort+unique technique
+			std::unordered_set<uint32_t> const queueUniqueIndicesSet(std::begin(m_queueIdxArr), std::end(m_queueIdxArr));
+			queueUniqueIndices.resize(queueUniqueIndicesSet.size());
+			std::copy(queueUniqueIndicesSet.cbegin(), queueUniqueIndicesSet.cend(), queueUniqueIndices.begin());
 		}
-
 		// each queue must have a "priority", between 0.0 and 1.0. the higher the priority the more
 		// important the queue is, and such information MIGHT be used by the implementation to eg.
 		// schedule the queues, give processing time to them. Vulkan makes NO GUARANTEES
-		float* queue_priorities = reinterpret_cast<float*>(queue_unique_indices + queue_unique_indices_cnt);
-		for (uint32_t i = 0u; i < queue_unique_indices_cnt; ++i)
-		{
-			// TODO i could have just hardcoded 1.0f as priority, but allocating unique values makes it more future proof?
-			queue_priorities[i] = 1.0f;
-		}
+		VectorCustom<float> queuePriorities(queueUniqueIndices.size(), 1.f);
 		
-		// for each unique queue we need a VkDeviceQueueCreateInfo
-		auto dev_queues_create_infos = reinterpret_cast<VkDeviceQueueCreateInfo*>(queue_buffer + queue_unique_indices_cnt * (sizeof(uint32_t) + sizeof(float))); // TODO change to std::byte. Note to self: allocate bytes instead of void*
-		for (uint32_t i = 0u; i < queue_unique_indices_cnt; ++i)
-		{
-			dev_queues_create_infos[i] = {
-				.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-				.pNext = nullptr, // TODO ?
-				.flags = 0, // it has just the value VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT, idk what is it, type is an enum called VkDeviceQueueCreateFlags
-				.queueFamilyIndex = queue_unique_indices[i],
-				.queueCount = 1, // every queue family supports at least 1 queue. For more than one, you check the Physical device queue family properties TODO
-				.pQueuePriorities = queue_priorities 
-			};
-		}
-
-		// TODO this is to refactor and move to physical device selection code
-		// specify needed extensions
-		uint32_t constexpr dev_exts_cnt = 1;
-		char const* dev_exts[dev_exts_cnt] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; // TODO here you specify externally needed device extensions. export this. init will take params
-		bool dev_exts_checked[dev_exts_cnt] = {0}; // zero initialized
-
-		// then check against actual support of needed extensions for the device
-		uint32_t supported_dev_exts_cnt;
-		vkEnumerateDeviceExtensionProperties(m_phyDevice, nullptr, &supported_dev_exts_cnt, nullptr);
-
-		auto supported_dev_exts = static_cast<VkExtensionProperties*>(malloc(supported_dev_exts_cnt * sizeof(VkExtensionProperties)));
-		if (!supported_dev_exts)
-		{
-			free(queue_buffer);
-			return APP_MEMORY_ERR;
-		}
-
-		vkEnumerateDeviceExtensionProperties(m_phyDevice, nullptr, &supported_dev_exts_cnt, supported_dev_exts);
-
-		for (uint32_t i = 0u; i < supported_dev_exts_cnt; ++i)
-		{
-			for (uint32_t j = 0u; j < dev_exts_cnt; ++j)
-			{
-				if (0 == strcmp(supported_dev_exts[i].extensionName, dev_exts[j]))
-				{
-					dev_exts_checked[j] = true;
-				}
-			}
-		}
-
-		free(supported_dev_exts);
-
-		{
-			uint32_t i = 0;
-			for (; i < dev_exts_cnt && dev_exts_checked[i]; ++i);
-	
-			if (i != dev_exts_cnt)
-			{
-				free(queue_buffer);
-				return APP_GENERIC_ERR;
-			}
-		}
-
-		VkDeviceCreateInfo const device_create_info = {
-			.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+		// -- create a VkDeviceQueueCreateInfo for each unique queue --------------------------------------------------------------------------------
+		VectorCustom<VkDeviceQueueCreateInfo> deviceQueueCreateInfos(queueUniqueIndices.size(), {
+			.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 			.pNext = nullptr, // TODO ?
-			.queueCreateInfoCount = queue_unique_indices_cnt,
-			.pQueueCreateInfos = dev_queues_create_infos, 
-			.enabledExtensionCount = dev_exts_cnt, // TODO ?
-			.ppEnabledExtensionNames = dev_exts,
+			.flags = 0, // it has just the value VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT, idk what is it, type is an enum called VkDeviceQueueCreateFlags
+			.queueFamilyIndex = 0,
+			.queueCount = 1, // every queue family supports at least 1 queue. For more than one, you check the Physical device queue family properties TODO
+			.pQueuePriorities = nullptr
+		});
+	
+		for (uint32_t i = 0u; i < deviceQueueCreateInfos.size(); ++i)
+		{
+			deviceQueueCreateInfos[i].queueFamilyIndex = queueUniqueIndices[i];
+			deviceQueueCreateInfos[i].pQueuePriorities = queuePriorities.data(); 
+		}
+
+		// TODO this is to refactor and move to physical device selection code. Do it by passing supported extensions to the init function and then pass them here
+		// -- Create device ------------------------------------------------------------------------------------------------------------------
+		VkDeviceCreateInfo const deviceCreateInfo = {
+			.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+			.pNext = nullptr, // TODO explore extensions in future
+			.queueCreateInfoCount = static_cast<uint32_t>(deviceQueueCreateInfos.size()),
+			.pQueueCreateInfos = deviceQueueCreateInfos.data(), 
+			.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size()),
+			.ppEnabledExtensionNames = deviceExtensions.data(),
 			.pEnabledFeatures = nullptr // feature specification is OPTIONAL, VkPhysicalDeviceFeatures* TODO add---------------------------------------------------------- init params
 		}; 
 
-		if (vkCreateDevice(m_phyDevice, &device_create_info, /*VkAllocationCallbacks*/nullptr, &m_device) != VK_SUCCESS)
+		if (vkCreateDevice(m_phyDevice, &deviceCreateInfo, /*VkAllocationCallbacks*/nullptr, &m_device) != VK_SUCCESS)
 		{
-			free(queue_buffer);
 			return APP_DEVICE_CREATION_ERR;
 		}
 
 		// TODO VK_EXT_device_memory_report, in 4.2 in vkspec
 		
-		// if anything goes wrong with the device when executing a command, it can become "lost", to query with "VK_ERROR_DEVICE_LOST", which is a return
-		// value of some operations using the device. When a device is lost, "its child objects (anything created/allocated whose creation function has as"
-		// "first param the device), are not destroyed"
+		// if anything goes wrong with the device when executing a command, it can become "lost", to query with "VK_ERROR_DEVICE_LOST", which 
+		// is a return value of some operations using the device. When a device is lost, "its child objects (anything created/allocated whose
+		// creation function has as first param the device), are not destroyed"
 		
 		m_progressStatus |= DEVICE_CREATED;
 		printf("created device!\n");
 
-		/* ~Queues store~ */
+		// -- store queue handles --------------------------------------------------------------------------------------------------------------
 		for (uint32_t i = 0u; i < MXC_RENDERER_QUEUES_COUNT; ++i)
 		{
 			vkGetDeviceQueue(m_device, 
@@ -843,12 +800,11 @@ namespace mxc
 							 &m_queues[i]);
 		}
 
-		free(queue_buffer);
 		return APP_SUCCESS;
 	}
 
 	// TODO refactor
-	auto renderer::setupSurfaceKHR(GLFWwindow* window) & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSurfaceKHR(GLFWwindow* window) & -> status_t
 	{
 		// setup surface
 		if (VK_SUCCESS != glfwCreateWindowSurface(m_instance, window, /*VkAllocationCallbacks**/nullptr, &m_surface))
@@ -862,7 +818,7 @@ namespace mxc
 	}
 
 	// TODO for now will use composite alpha opaque
-	auto renderer::setupSwapchain() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSwapchain() & -> status_t
 	{
 		// m_surfaceCapabilities.currentExtent, needed for swapchain creation, can contain either 
 		// the current width and height of the surface or the special value {0xfffffffff,0xffffffff), indicating
@@ -964,7 +920,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::setupCommandBuffers() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupCommandBuffers() & -> status_t
 	{
 		assert(m_progressStatus & DEVICE_CREATED && "command pools are child objects of devices, hence we need a device\n");
 
@@ -1008,7 +964,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	//auto renderer::setupDepthImage() & -> status_t
+	//template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupDepthImage() & -> status_t
 	//{
 	//	assert(m_progressStatus & DEVICE_CREATED);
 
@@ -1081,7 +1037,7 @@ namespace mxc
 	//	return APP_SUCCESS;
 	//}
 
-	//auto renderer::setupDepthDeviceMemory() & -> status_t
+	//template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupDepthDeviceMemory() & -> status_t
 	//{
 	//	assert((m_progressStatus & (DEVICE_CREATED | DEPTH_IMAGE_CREATED)) && "VkDevice required to allocate VkDeviceMemory!\n");
 
@@ -1128,7 +1084,7 @@ namespace mxc
 	//	return APP_SUCCESS;
 	//}
 
-	auto renderer::setupRenderPass() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupRenderPass() & -> status_t
 	{
 		// render pass output attachment descriptions array (for the render pass, we will also need attachment references for the subpasses, which are handles decorated with some data to this array)
 		VkAttachmentDescription const outAttachmentDescriptions[MXC_RENDERER_ATTACHMENT_COUNT] {
@@ -1248,7 +1204,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::setupFramebuffers() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupFramebuffers() & -> status_t
 	{
 		assert(m_progressStatus & RENDERPASS_CREATED);
 
@@ -1291,7 +1247,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::setupGraphicsPipeline() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
 	{
 		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
 
@@ -1313,6 +1269,7 @@ namespace mxc
 			fprintf(stderr, "failed to create graphics pipeline layout!\n");
 			return APP_GENERIC_ERR;
 		}
+		printf("created graphics pipeline layout\n");
 		m_progressStatus |= GRAPHICS_PIPELINE_LAYOUT_CREATED;
 
 		// -- VkPipelineShaderStageCreateInfo describes the shaders to use in the graphics pipeline TODO number of stages hardcoded
@@ -1367,7 +1324,7 @@ namespace mxc
 			return APP_GENERIC_ERR;
 		}
 	#else
-		std::vector<char> shadersBuf[2];
+		VectorCustom<char> shadersBuf[2];
 		shadersBuf[0].resize(shaderSizes[0]);
 		shadersBuf[1].resize(shaderSizes[1]);
 		printf("current path is %s\nshader path of vertex shader: %s\nshader path of fragment shader: %s\n", fs::current_path().c_str(), shaderPaths[0].c_str(), shaderPaths[1].c_str());
@@ -1627,7 +1584,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::setupSynchronizationObjects() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSynchronizationObjects() & -> status_t
 	{
 		assert((m_progressStatus & DEVICE_CREATED) && "device is required to create synchronization primitives!\n");
 		
@@ -1693,7 +1650,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::recordCommands(uint32_t framebufferIdx) & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::recordCommands(uint32_t framebufferIdx) & -> status_t
 	{
 		assert(framebufferIdx < m_swapchainImagesCnt && "framebuffer index out of bounds");
 		assert((m_progressStatus & (GRAPHICS_PIPELINE_CREATED | COMMAND_BUFFER_ALLOCATED)) && "command buffer recording requires a pipeline and a command buffer!\n");
@@ -1743,7 +1700,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::draw() & -> status_t
+	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::draw() & -> status_t
 	{
 		uint32_t static currentFramebuffer = 0u;
 
@@ -1819,7 +1776,8 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	auto renderer::progress_incomplete() const & -> status_t 
+	template <template<class> class AllocTemplate>
+	auto renderer<AllocTemplate>::progress_incomplete() const & -> status_t 
 	{
 		status_t const status = m_progressStatus ^ (
 			SYNCHRONIZATION_OBJECTS_CREATED |
@@ -1864,7 +1822,7 @@ namespace mxc
 	private: // data
 		// main components
 		GLFWwindow* m_window;
-		renderer m_renderer;
+		renderer<Mallocator> m_renderer;
 
 	private: // utilities functions
 	
@@ -1975,7 +1933,7 @@ namespace mxc
 		 * if you don't need any additional extension other than those required by GLFW, then you can pass this pointer directly to ppEnabledExtensions in VkInstanceCreateInfo.
 		 * Assuming we could need more in the future, I will store them as state by a dynamically allocated buffer in the renderer
 		 */
-		std::vector<char const*> desiredInstanceExtensions;
+		std::vector<char const*, Mallocator<char const*>> desiredInstanceExtensions;
 		desiredInstanceExtensions.reserve(glfwInstanceExtensionCnt + 1);
 		for (uint32_t i = 0; i < glfwInstanceExtensionCnt; ++i)
 		{
@@ -1985,7 +1943,10 @@ namespace mxc
 		desiredInstanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		#endif
 
-		if (m_renderer.init(desiredInstanceExtensions, m_window) == APP_GENERIC_ERR)
+		std::vector<char const*, Mallocator<char const*>> desiredDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+		if (m_renderer.init(std::span(desiredInstanceExtensions.begin(), desiredInstanceExtensions.end()), 
+							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}
