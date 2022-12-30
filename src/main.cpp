@@ -14,7 +14,7 @@
 #include <vector>
 #include <span> // unused yet
 #include <unordered_set>
-#include <algorithm> // copy
+#include <algorithm> // copy, unstable_sort, transform, unique
 
 // here just for the copied allocator
 #include <new>
@@ -102,6 +102,113 @@ namespace mxc
 	// TODO change return conventions into more meaningful and specific error carrying type to convey a more 
 	// 		specific status report
 	/*** WARNING: most of the functions will return APP_TRUE if successful, and APP_FALSE if unsuccessful ***/
+	struct VulkanPipelineConfig {
+		VkPipelineVertexInputStateCreateInfo vertexInputStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.vertexBindingDescriptionCount = 0,
+			.pVertexBindingDescriptions = nullptr,
+			.vertexAttributeDescriptionCount = 0,
+			.pVertexAttributeDescriptions = nullptr
+		};
+
+		VkPipelineInputAssemblyStateCreateInfo inputAssemblyStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			.primitiveRestartEnable = VK_FALSE
+		};
+
+		VkPipelineTessellationStateCreateInfo tessellationStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.patchControlPoints = 0
+		};
+
+		VkPipelineViewportStateCreateInfo viewportStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+			.pNext = nullptr, 
+			.flags = 0,
+			.viewportCount = 1,
+			.pViewports = nullptr,
+			.scissorCount = 1,
+			.pScissors = nullptr 
+		};
+
+		VkPipelineRasterizationStateCreateInfo rasterizationStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.depthClampEnable = VK_FALSE,
+			.rasterizerDiscardEnable = VK_FALSE,
+			.polygonMode = VK_POLYGON_MODE_FILL,
+			.cullMode = VK_CULL_MODE_BACK_BIT,
+			.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+			.depthBiasEnable = VK_FALSE,
+			.depthBiasConstantFactor = 0.f,
+			.depthBiasClamp = 0.f,
+			.depthBiasSlopeFactor = 0.f,
+			.lineWidth = 1.f,
+		};
+
+		VkPipelineMultisampleStateCreateInfo multisampleStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+			.sampleShadingEnable = VK_FALSE,
+			.minSampleShading = 0.f,
+			.pSampleMask = nullptr,
+			.alphaToCoverageEnable = VK_FALSE,
+			.alphaToOneEnable = VK_FALSE
+		};
+
+		//VkStencilOpState constexpr stencilOpState {
+		//		.failOp = VK_STENCIL_OP_KEEP, // what to do if stencil test fails
+		//		.passOp = VK_STENCIL_OP_KEEP, // what to do if stencil test is successful
+		//		.depthFailOp = VK_STENCIL_OP_KEEP, // passes stencil but fails depth test
+		//		.compareOp = VK_COMPARE_OP_ALWAYS, // specifies stencil test operation. same type as depth comparison, but with another meaning
+		//		.compareMask = 0, // selects the bits of the unsigned integer values participating in the stencil test
+		//		.writeMask = 0, // selects the bits of the unsigned integer values updated by the stencil test in the stencil framebuffer attachment
+		//		.reference = 0 // integer stencil reference value used in some of the compare ops
+		//}
+		VkPipelineDepthStencilStateCreateInfo depthStencilStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.depthTestEnable = VK_FALSE,
+			.depthWriteEnable = VK_FALSE,
+			.depthCompareOp = VK_COMPARE_OP_LESS,
+			.depthBoundsTestEnable = VK_FALSE,
+			.stencilTestEnable = VK_FALSE,
+			.front = {VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_COMPARE_OP_ALWAYS,0,0,0},
+			.back = {VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_COMPARE_OP_ALWAYS,0,0,0},
+			.minDepthBounds = 0.f,
+			.maxDepthBounds = 0.f
+		};
+
+		VkPipelineColorBlendStateCreateInfo colorBlendStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.logicOpEnable = VK_FALSE,
+			.logicOp = VkLogicOp{},
+			.attachmentCount = 1u,
+			.pAttachments = nullptr,
+			.blendConstants = {}
+		};
+
+		VkPipelineDynamicStateCreateInfo dynamicStateCI {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.dynamicStateCount = 0,
+			.pDynamicStates = nullptr
+		};
+	};
 
 	template <template<class> class AllocTemplate = std::allocator>
 	class renderer
@@ -173,6 +280,7 @@ namespace mxc
 		//VkImageView m_depthImageView;
 		//VkDeviceMemory m_depthImageMemory;
 
+		// cmdbuf count = framebuffer count = swapchain images count = semaphores count = fences count
 		VectorCustom<VkFramebuffer> m_framebuffers; // triple buffering
 			
 		#define MXC_RENDERER_SHADERS_COUNT 2
@@ -190,9 +298,8 @@ namespace mxc
 		VkPresentModeKHR m_presentModeUsed;
 		VkSurfaceCapabilitiesKHR m_surfaceCapabilities; // TODO remember to check these in the creation of swapchain, pipeline, ...
 		VkSwapchainKHR m_swapchain;
-		VkImage* m_pSwapchainImages; // swapchainImages and swapchainImageViews are dynamically allocated, free them. see setupSwapchain for allocation
-		VkImageView* m_pSwapchainImageViews;
-		uint32_t m_swapchainImagesCnt;
+		VectorCustom<VkImage> m_swapchainImages;
+		VectorCustom<VkImageView> m_swapchainImageViews;
 		VkExtent2D m_surfaceExtent;
 
 		// other vulkan related
@@ -232,6 +339,8 @@ namespace mxc
 		};
 	
 	private: // functions, utilities
+		
+
 		#ifndef NDEBUG
 		auto dbgPrintInstanceExtensionsAndLayers(std::span<const char*> const& instanceExtensions, std::span<char const*> const& layers) -> void;
 		#endif
@@ -241,10 +350,10 @@ namespace mxc
 			: m_instance(VK_NULL_HANDLE), m_phyDevice(VK_NULL_HANDLE), m_device(VK_NULL_HANDLE)
 			, m_queueIdxArr{-1}, m_queues{VK_NULL_HANDLE} // TODO Don't forget to update m_queueIdxArr when adding queue types
 			, m_graphicsCmdPool(VK_NULL_HANDLE), m_graphicsCmdBufs(VectorCustom<VkCommandBuffer>(0)), m_renderPass(VK_NULL_HANDLE)
-			, m_framebuffers(VectorCustom<VkFramebuffer>(0)), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
-			, m_fenceInFlightFrame(VectorCustom<VkFence>(0)), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>(0)), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>(0))//, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
+			, m_framebuffers(VectorCustom<VkFramebuffer>()), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
+			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>())//, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
 			, /*m_depthImageMemory(VK_NULL_HANDLE),*/ m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
-			, m_swapchain(VK_NULL_HANDLE), m_pSwapchainImages(nullptr), m_pSwapchainImageViews(nullptr), m_swapchainImagesCnt(0)
+			, m_swapchain(VK_NULL_HANDLE), m_swapchainImages(VectorCustom<VkImage>()), m_swapchainImageViews(VectorCustom<VkImageView>())
 			, m_surfaceExtent(VkExtent2D{0,0})//, m_depthImageFormat(VK_FORMAT_D32_SFLOAT)
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 			, m_dbgMessenger(VK_NULL_HANDLE)
@@ -290,7 +399,7 @@ namespace mxc
 
 		// Then we can clean everything up. Note that we do not check for successful initialization. That's because
 		// the vkDestroy and vkDeallocate functions can be called when the handle to be destroyed/freed is VK_NULL_HANDLE 
-		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
+		for (uint32_t i = 0u; i < m_swapchainImages.size(); ++i)
 		{
 			vkDestroyFence(m_device, m_fenceInFlightFrame[i], /*VkAllocationCallbacks**/nullptr);
 			vkDestroySemaphore(m_device, m_semaphoreImageAvailable[i], /*VkAllocationCallbacks**/nullptr);
@@ -301,7 +410,7 @@ namespace mxc
 		vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
 
 		// TODO vkDestroyFramebuffer times 3, then free memory 
-		for (uint32_t i = 0; i < m_swapchainImagesCnt; ++i)
+		for (uint32_t i = 0; i < m_swapchainImages.size(); ++i)
 		{
 			vkDestroyFramebuffer(m_device, m_framebuffers[i], /*VkAllocationCallbacks**/nullptr);
 		}
@@ -320,15 +429,12 @@ namespace mxc
 	
 		vkDestroyRenderPass(m_device, m_renderPass, /*VkAllocationCallbacks**/nullptr);
 	
-		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, m_swapchainImagesCnt, m_graphicsCmdBufs.data());
+		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, static_cast<uint32_t>(m_swapchainImages.size()), m_graphicsCmdBufs.data());
 		vkDestroyCommandPool(m_device, m_graphicsCmdPool, /*VkAllocationCallbacks**/nullptr);
 
-		// frees both swapchain images and images views, they share the memory buffer
-		free(m_pSwapchainImages);
-
-		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
+		for (uint32_t i = 0u; i < m_swapchainImages.size(); ++i)
 		{
-			vkDestroyImageView(m_device, m_pSwapchainImageViews[i], /*VkAllocationCallback**/nullptr);
+			vkDestroyImageView(m_device, m_swapchainImageViews[i], /*VkAllocationCallback**/nullptr);
 		}
 
 		vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr);
@@ -820,24 +926,28 @@ namespace mxc
 	// TODO for now will use composite alpha opaque
 	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSwapchain() & -> status_t
 	{
+		// -- create swapchain ----------------------------------------------------------------------------------------------------------------
+		// TODO remove hardcoded window width and height when implementing dynamic viewport
 		// m_surfaceCapabilities.currentExtent, needed for swapchain creation, can contain either 
 		// the current width and height of the surface or the special value {0xfffffffff,0xffffffff), indicating
-		// that I can choose image size, which in such case will be the window size 
-		VkExtent2D const extent_used = m_surfaceCapabilities.currentExtent.width == 0xffffffff 
-				? m_surfaceCapabilities.currentExtent 
-				: VkExtent2D{.width=WINDOW_WIDTH, .height=WINDOW_HEIGHT};
+		// that I can choose image size, which in such case will be the window size
+		m_surfaceExtent = {
+			.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH,
+			.height= m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
+		};
 
 		// if the graphics and presentation queue (TODO might change as these change) belong to the 
 		// same queue family, or not. the swapchain needs to know about how many and which queue families it will
 		// deal with. TODO to refactor out when structure of family queue indices will change. in particular, if and when we decide to use more than one queue per family this has to change
-		uint32_t const queue_family_cnt = 1u + (m_queueIdx.graphics == m_queueIdx.presentation);
-		uint32_t const queue_family_idxs[2] = {static_cast<uint32_t>(m_queueIdx.graphics), static_cast<uint32_t>(m_queueIdx.presentation)};
+		uint32_t const queueFamilyCnt = 1u + (m_queueIdx.graphics == m_queueIdx.presentation);
+		uint32_t const queueFamilyIndices[2] = {static_cast<uint32_t>(m_queueIdx.graphics), static_cast<uint32_t>(m_queueIdx.presentation)};
+		
 		
 		// swapchain requires we specify if the image is going to be accessed by one queue at a time (sharing mode = exclusive) or by more than one (sharing mode = concurrent).
 		// this depends on whether or not the presentation queue and the graphics queue are one and the same.
-		VkSharingMode imageSharingMode = queue_family_cnt == 1 ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT;
+		VkSharingMode imageSharingMode = queueFamilyCnt == 1 ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT;
 
-		VkSwapchainCreateInfoKHR const swapchain_create_info = {
+		VkSwapchainCreateInfoKHR const swapchainCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
 			.pNext = nullptr,
 			.flags = 0u, 
@@ -845,12 +955,12 @@ namespace mxc
 			.minImageCount = m_surfaceCapabilities.minImageCount + 1, // increment by one to allow for TRIBLE BUFFERING
 			.imageFormat = m_surfaceFormatUsed.format,
 			.imageColorSpace = m_surfaceFormatUsed.colorSpace,
-			.imageExtent = extent_used,
+			.imageExtent = m_surfaceExtent,
 			.imageArrayLayers = 1, // number of views in a multiview surface. >1 only for stereoscopic apps, like VR
 			.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // bitfield expressing in how many ways an image will be used. TODO for now only colour
 			.imageSharingMode = imageSharingMode, // either EXCLUSIVE or CONCURRENT, first means that an image will be exclusive to family queues, other concurrent, we have only one graphics family queue for now TODO
-			.queueFamilyIndexCount = queue_family_cnt,
-			.pQueueFamilyIndices = queue_family_idxs,
+			.queueFamilyIndexCount = queueFamilyCnt,
+			.pQueueFamilyIndices = queueFamilyIndices,
 			.preTransform = m_surfaceCapabilities.currentTransform, // transform applied before presentation to image. will use current transform given by surface, which means do nothing
 			.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, // type VkCompositeAlphaFlagBitsKHR, indicates which alpha compositing mode to use after fragment shader
 			.presentMode = m_presentModeUsed,
@@ -858,7 +968,7 @@ namespace mxc
 			.oldSwapchain = VK_NULL_HANDLE // special Vulkan object handle value specifying an invalid object
 		};
 
-		VkResult res = vkCreateSwapchainKHR(m_device, &swapchain_create_info, /*vkAllocationCallbacks**/nullptr, &m_swapchain);
+		VkResult res = vkCreateSwapchainKHR(m_device, &swapchainCreateInfo, /*vkAllocationCallbacks**/nullptr, &m_swapchain);
 		if (res != VK_SUCCESS)
 		{
 			return APP_SWAPCHAIN_CREATION_ERR;
@@ -867,26 +977,24 @@ namespace mxc
 		m_progressStatus |= SWAPCHAIN_CREATED;
 		printf("swapchain created!\n");
 
-		// get images from swapchain and create associated image views
-		vkGetSwapchainImagesKHR(m_device, m_swapchain, &m_swapchainImagesCnt, nullptr);
-		auto image_buffer = static_cast<unsigned char*>(malloc(m_swapchainImagesCnt * (sizeof(VkImage)+sizeof(VkImageView))));
-		if (!image_buffer)
+		// -- get images from swapchain and create associated image views --------------------------------------------------------------------
 		{
-			return APP_MEMORY_ERR;
+			uint32_t swapchainImagesCnt;
+			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, nullptr);
+			assert(swapchainImagesCnt);
+			m_swapchainImages.resize(swapchainImagesCnt);
+			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, m_swapchainImages.data());
 		}
 
-		m_pSwapchainImages = reinterpret_cast<VkImage*>(image_buffer);
-		vkGetSwapchainImagesKHR(m_device, m_swapchain, &m_swapchainImagesCnt, m_pSwapchainImages);
-		
 		// TODO refactor image view creation
-		m_pSwapchainImageViews = reinterpret_cast<VkImageView*>(m_pSwapchainImages + m_swapchainImagesCnt);
-		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
+		m_swapchainImageViews.resize(m_swapchainImages.size());
+		for (uint32_t i = 0u; i < m_swapchainImageViews.size(); ++i)
 		{
 			VkImageViewCreateInfo const image_view_create_info = {
 				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 				.pNext = nullptr, // TODO what
-				.flags = static_cast<VkImageViewCreateFlagBits>(0),
-				.image = m_pSwapchainImages[i],
+				.flags = 0,
+				.image = m_swapchainImages[i],
 				.viewType = VK_IMAGE_VIEW_TYPE_2D,  // dimensionality and number of image
 				.format = m_surfaceFormatUsed.format,
 				.components = VkComponentMapping{
@@ -905,16 +1013,12 @@ namespace mxc
 				}
 			};
 
-			VkResult const res = vkCreateImageView(m_device, &image_view_create_info, /*VkAllocationCallbacks**/nullptr, &m_pSwapchainImageViews[i]);
+			res = vkCreateImageView(m_device, &image_view_create_info, /*VkAllocationCallbacks**/nullptr, &m_swapchainImageViews[i]);
 			if (res != VK_SUCCESS)
 			{
-				free(image_buffer);
 				return APP_GENERIC_ERR;
 			}
 		}
-
-		m_surfaceExtent.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH, // TODO remove this is duplicated code
-		m_surfaceExtent.height = m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
 		
 		m_progressStatus |= SWAPCHAIN_IMAGE_VIEWS_CREATED;
 		return APP_SUCCESS;
@@ -924,7 +1028,7 @@ namespace mxc
 	{
 		assert(m_progressStatus & DEVICE_CREATED && "command pools are child objects of devices, hence we need a device\n");
 
-		// create command buffer pool
+		// -- create command buffer pool -------------------------------------------------------------------------------------------
 		VkCommandPoolCreateInfo const cmdPoolCreateInfo{
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 			.pNext = nullptr,
@@ -939,17 +1043,17 @@ namespace mxc
 			fprintf(stderr, "failed to create a command pool for the graphics queue!\n");
 			return APP_MEMORY_ERR;
 		}
-
-		// allocate command buffer (if fails destroy command pool)
+	
+		// -- allocate command buffers (if fails destroy command pool). There will be 1 command buffer for each framebuffer ------------------------
 		VkCommandBufferAllocateInfo const graphicsCmdBufAllocInfo{
 			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 			.pNext = nullptr,
 			.commandPool = m_graphicsCmdPool,
 			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, // VkCommandBufferLevel, can either be PRIMARY=surface level commands, executed by queues or SECONDARY = can be called by primary/secondary command buffers, a bit like functions
-			.commandBufferCount = m_swapchainImagesCnt
+			.commandBufferCount = static_cast<uint32_t>(m_swapchainImages.size()) // cmdbuf count = framebuffer count = swapchain images count = semaphores count = fences count
 		};
 
-		m_graphicsCmdBufs.resize(m_swapchainImagesCnt);
+		m_graphicsCmdBufs.resize(m_swapchainImages.size());
 
 		res = vkAllocateCommandBuffers(m_device, &graphicsCmdBufAllocInfo, m_graphicsCmdBufs.data());
 		if (res != VK_SUCCESS)
@@ -1086,6 +1190,7 @@ namespace mxc
 
 	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupRenderPass() & -> status_t
 	{
+		// -- create output attachment and references ------------------------------------------------------------------------------------
 		// render pass output attachment descriptions array (for the render pass, we will also need attachment references for the subpasses, which are handles decorated with some data to this array)
 		VkAttachmentDescription const outAttachmentDescriptions[MXC_RENDERER_ATTACHMENT_COUNT] {
 			// color attachment
@@ -1148,7 +1253,8 @@ namespace mxc
 			}
 		};
 
-		// subpass dependency creation
+		// -- subpass dependencies creation ---------------------------------------------------------------------------------------
+		// last subpass dependency, since it's from initial to final layout, it's implicit but we specify it anyway. the first is needed
 		// subpasses may execute out of order among each other, and this is a problem since the image during rendering will be manipulated in different intermediate gpu-specific formats depending on which stage of the
 		// render pass an image currently is. Therefore we require that between an image forma transition to the other the n-th subpass has finished executing in all invocations before starting with the other.
 		VkSubpassDependency subpassDependencies[] {
@@ -1177,7 +1283,7 @@ namespace mxc
 			}
 		};
 
-		// render pass creation
+		// -- render pass creation --------------------------------------------------------------------------------------------------------------
 		VkRenderPassCreateInfo const renderPassCreateInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
 			.pNext = nullptr,
@@ -1208,9 +1314,19 @@ namespace mxc
 	{
 		assert(m_progressStatus & RENDERPASS_CREATED);
 
-		m_framebuffers.resize(m_swapchainImagesCnt);
-		// create vulkan non dispachable handles VkFramebuffers
-		VkImageView usedAttachments[MXC_RENDERER_ATTACHMENT_COUNT] { m_pSwapchainImageViews[0]/*, m_depthImageView*/}; // we have 2 attachments per swapchain image, 1st is color, 2nd depth. Depth doesn't change
+		// -- create Framebuffers -----------------------------------------------------------------------------------------------
+		m_framebuffers.resize(m_swapchainImages.size());
+
+		// The reason you need multiple presentable images is because one (or more) of them is in the process of being presented. 
+		// During that time (which could take a while), you still want the GPU to be doing stuff. Since it can’t “do stuff” to the image that’s 
+		// being presented, it would have to “do stuff” to some other image. But you’re not presenting your depth buffer, are you? 
+		// None of the above applies.the contents of the depth buffer are its own. Its contents are generated by on-GPU processes: the renderpass 
+		// load/clear operation, subpasses that use it as a depth attachment, etc. Once you’re finished generating an image with the depth buffer, 
+		// you don’t need it anymore. So that buffer can be immediately reused by another rendering process. the only potential synchronization issue 
+		// is that you have to prevent the next frame’s rendering commands from starting until the current frame’s commands have finished with the 
+		// depth buffer. And since you usually have plenty of other reasons for imposing synchronization between frames, 
+		// that synchronization should be sufficient.
+		VkImageView usedAttachments[MXC_RENDERER_ATTACHMENT_COUNT] { m_swapchainImageViews[0]/*, m_depthImageView*/}; // we have 2 attachments per swapchain image, 1st is color, 2nd depth. Depth doesn't change
 
 		VkFramebufferCreateInfo framebufferCreateInfo {
 			.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
@@ -1219,8 +1335,8 @@ namespace mxc
 			.renderPass = m_renderPass,
 			.attachmentCount = MXC_RENDERER_ATTACHMENT_COUNT,
 			.pAttachments = usedAttachments, // as it's a pointer, all I have to do to create 3 different framebuffers is to change the color output attachment in the loop
-			.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH, // TODO remove this is duplicated code
-			.height = m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
+			.width = m_surfaceExtent.width,
+			.height = m_surfaceExtent.height,
 			.layers = 1 // TODO remove hardcoded number
 		};
 
@@ -1239,7 +1355,7 @@ namespace mxc
 				return APP_GENERIC_ERR;
 			}
 
-			usedAttachments[0] = m_pSwapchainImageViews[i+1]; // will go out of bounds in last iteration, but won't be read
+			usedAttachments[0] = m_swapchainImageViews[i+1]; // will go out of bounds in last iteration, but won't be read
 		}
 
 		printf("%u framebuffers created!\n", m_framebuffers.size());
@@ -1252,7 +1368,7 @@ namespace mxc
 		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
 
 		// creation of all information about pipeline steps: layout, and then in order of execution
-		// -- pipeline layout TODO update when adding descriptor sets
+		// -- pipeline layout TODO update when adding descriptor sets --------------------------------------------------------------------------------------------------------------
 		VkPipelineLayoutCreateInfo const graphicsPipelineLayoutCI {
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 			.pNext = nullptr,
@@ -1272,7 +1388,7 @@ namespace mxc
 		printf("created graphics pipeline layout\n");
 		m_progressStatus |= GRAPHICS_PIPELINE_LAYOUT_CREATED;
 
-		// -- VkPipelineShaderStageCreateInfo describes the shaders to use in the graphics pipeline TODO number of stages hardcoded
+		// -- VkPipelineShaderStageCreateInfo describes the shaders to use in the graphics pipeline TODO number of stages hardcoded ----------------------------------------------------------------------------------------------
 		// ---- creation of the shader modules
 		// ------ evaluate file sizes
 		namespace fs = std::filesystem;
@@ -1282,48 +1398,6 @@ namespace mxc
 		size_t const shaderSizes[MXC_RENDERER_SHADERS_COUNT] {fs::file_size(shaderPaths[0], ecs[0]), fs::file_size(shaderPaths[1], ecs[1])}; // TODO check the error code, whose codes themselves are platform specific
 		
 		// ------ allocate char buffers to store shader binary data
-	#define APP_USE_STRING_DEBUG
-	#ifndef APP_USE_STRING_DEBUG
-		auto shadersBuf = static_cast<char*>(malloc(shaderSizes[0] + shaderSizes[1] + 2/*NUL*/));
-		if (!shadersBuf)
-		{
-			return APP_MEMORY_ERR;
-		}
-		std::ifstream shaderStreams[MXC_RENDERER_SHADERS_COUNT] {std::ifstream(shaderPaths[0]), std::ifstream(shaderPaths[1])};
-		shaderStreams[0].read(shadersBuf, shaderSizes[0]);
-		shadersBuf[shaderSizes[0]] = '\0';
-		shaderStreams[1].read(shadersBuf+shaderSizes[0]+1, shaderSizes[1]);
-		shadersBuf[shaderSizes[0]+shaderSizes[1]+1] = '\0';
-
-		printf("%s\n", shadersBuf);
-		printf("%s\n", shadersBuf+shaderSizes[0]+1);
-
-		VkShaderModuleCreateInfo const shaderModuleCreateInfos[MXC_RENDERER_SHADERS_COUNT] {
-			{ // Vertex Shader Module Create Info
-				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-				.pNext = nullptr,
-				.flags = 0,
-				.codeSize = shaderSizes[0],
-				.pCode = reinterpret_cast<uint32_t*>(shadersBuf)
-			},
-			{ // Fragment Shader Module Create Info
-				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-				.pNext = nullptr,
-				.flags = 0,
-				.codeSize = shaderSizes[1],
-				.pCode = reinterpret_cast<uint32_t*>(shadersBuf+shaderSizes[0]+1)
-			}
-		};
-
-		VkShaderModule shaders[MXC_RENDERER_SHADERS_COUNT] = {VK_NULL_HANDLE};
-		if ( vkCreateShaderModule(m_device, &shaderModuleCreateInfos[0],/*VkAllocationCallbacks**/nullptr, &shaders[0]) != VK_SUCCESS 
-			|| vkCreateShaderModule(m_device, &shaderModuleCreateInfos[1], /*VkAllocationCallbacks**/nullptr, &shaders[1]) != VK_SUCCESS)
-		{
-			free(shadersBuf);
-			vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
-			return APP_GENERIC_ERR;
-		}
-	#else
 		VectorCustom<char> shadersBuf[2];
 		shadersBuf[0].resize(shaderSizes[0]);
 		shadersBuf[1].resize(shaderSizes[1]);
@@ -1364,7 +1438,7 @@ namespace mxc
 			vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
 			return APP_GENERIC_ERR;
 		}
-	#endif
+
 		// ---- creation of the information structure
 		VkPipelineShaderStageCreateInfo const graphicsPipelineShaderStageCIs[MXC_RENDERER_SHADERS_COUNT] {
 			VkPipelineShaderStageCreateInfo{ // VERTEX SHADER
@@ -1387,12 +1461,11 @@ namespace mxc
 			}
 		};
 
-		// -- VkPipelineVertexInputStateCreateInfo describes the vertices to be passed, without actually passing the data (number, stride, buffer to data). Ignored if Mesh shader is used
-		// ---- Creation of VkVertexAttributeDescriptions(in which bindings is the vertex data distributed ?) and VkVertexInputAttributeDescription(in which layout is each vertex in the bindings formatted?)
+		// -- rest of the pipeline create info -------------------------------------------------------------------------------------------------------------------------------------------------------------
 		VkVertexInputBindingDescription const vertInputBindingDescriptions[] {
 			{
 				.binding = 0, // Binding number which this structure is describing. You need a description for each binding in use. TODO we have no binding now
-				.stride = 0, // distance between successive elements in bytes (if attributes are stored interleaved, then stride = sizeof(Vertex))
+				.stride = 0, // distance between successive elements in bytes (if attributes are stored interleaved, per vert, then stride = sizeof(Vertex))
 				.inputRate = VK_VERTEX_INPUT_RATE_VERTEX // VkVertexInputRate specifies whether attributes stored in the buffer are PER VERTEX or PER INSTANCE
 			}
 		};
@@ -1406,35 +1479,6 @@ namespace mxc
 			}
 		};
 
-		VkPipelineVertexInputStateCreateInfo const graphicsPipelineVertexInputStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.vertexBindingDescriptionCount = 0, // TODO change this when you add some vertex attributes
-			.pVertexBindingDescriptions = vertInputBindingDescriptions,
-			.vertexAttributeDescriptionCount = 0,
-			.pVertexAttributeDescriptions = vertInputAttributeDescriptions
-		};
-
-		// -- VkPipelineInputAssemblyStateCreateInfo specifies behaviour of the input assembly stage, i.e. vertex attributes, topology,...
-		// with topology triangle list we specify each triangle separately. This means duplicate data for adjacent triangles, but it is the easier to start with. others include point list/strip, line list/strip, triangle list/strip/fan, (these 3,except fan, with or without adjacency(which means that some verts specifies an ADJACENCY EDGE, an edge not displayed whose points are accessible only to geo shader. purpose=primitive processing)), or patch list(see bezier curves, vertices are control points)
-		VkPipelineInputAssemblyStateCreateInfo const graphicsPipelineInputAssemblyStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,// chooses a PRIMITIVE TOPOLOGY, ie how consequent vertices are arranged in primitives during input assembly and kept up to the rasterization stage(if not altered by tesselation and/or geometry shader). In case of mesh shader, it is the latter that defines the topology used.
-			.primitiveRestartEnable = VK_FALSE // allows restart of topology (there are some topologies which can take as many verts and create a continuous mesh), and it will do that if, DURING INDEXED DRAWS(ONLY), the special value 0xfff...(number of f's depends on index type). Discards vertices of incomplete primitive (eg first of the 2 verts required to continue triangle strip)
-		};
-
-		// -- VkPipelineTessellationStateCreateInfo specifies the tessellation state used by the tessellation shaders, TODO future
-		VkPipelineTessellationStateCreateInfo const graphicsPipelineTessellationStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
-			.pNext = nullptr, // NULL or to an instance of domain origin state create info
-			.flags = 0,
-			.patchControlPoints = 0 // number of control points per patch. TODO we are not going to use tessellation for now
-		};
-
-		// -- VkPipelineViewportStateCreateInfo defines the window viewport, i.e. an rectangle+a set of scissors. NUM. SCISSORS = NUM. VIEWPORTS < VkPhysicalDeviceLimits::maxViewports
 		VkViewport const viewport {
 			.x = 0.f,// x,y define the upper-left corner of the viewport in screen coordinates. x,y must be >= viewportBoundsRange[0], x+width,y+height <= viewportBoundsRange[1]. they are VkPhysicalDeviceLimits
 			.y = 0.f,
@@ -1449,65 +1493,6 @@ namespace mxc
 			.extent = m_surfaceExtent // VkExtent type, has 2 UNSIGNED integers
 		};
 
-		VkPipelineViewportStateCreateInfo const graphicsPipelineViewportStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-			.pNext = nullptr, 
-			.flags = 0,
-			.viewportCount = 1, // greater than 1 requires multiviewport extension
-			.pViewports = &viewport,
-			.scissorCount = 1,
-			.pScissors = &scissor
-		};
-
-		// -- VkPipelineRasterizationStateCreateInfo specifies how the vertices will be rasterized, and stores the rasterization state
-		VkPipelineRasterizationStateCreateInfo const graphicsPipelineRasterizationStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-			.pNext = nullptr, // lots of extensions here
-			.flags = 0,
-			.depthClampEnable = VK_FALSE, // whether or not to enable depth clamp, i.e. anything with depth resulting from the depth test > farplane(1)
-			.rasterizerDiscardEnable = VK_FALSE, // are primitives discarded just before rasterization (no image produced), used only if you want to achieve some computation on vertex data, e.g. physics or animation
-			.polygonMode = VK_POLYGON_MODE_FILL, // TRIANGLE RENDERING MODE, this has nothing to do with the primitive topology, which defines how we want to GROUP vertex data to process and IDENTIFY SEPARATE OBJECTS. Here, we want to define if we want to color the points of each triangle, lines, or fill them completely
-			.cullMode = VK_CULL_MODE_BACK_BIT,// which face/faces of triangle to hide and which to display, relates to TRIANGLE WINDING, we want to setup the CCW orientation as front face, and cull the back face
-			.frontFace = VK_FRONT_FACE_CLOCKWISE, // TODO introduce transforms and swap this back to counter clockwise winding for front face
-			.depthBiasEnable = VK_FALSE, // TODO later, when doing shadow maps
-			.depthBiasConstantFactor = 0.f,
-			.depthBiasClamp = 0.f,
-			.depthBiasSlopeFactor = 0.f,
-			.lineWidth = 1.f,
-		};
-
-		// -- VkPipelineMultisampleStateCreateInfo structure defining multisampling state when multisampling is used
-		VkPipelineMultisampleStateCreateInfo const graphicsPipelineMultisampleStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, // number of samples used in the rasterization
-			.sampleShadingEnable = VK_FALSE, // see sample shading TODO later
-			.minSampleShading = 0.f, // disabled if no sample shading
-			.pSampleMask = nullptr, // disabled 
-			.alphaToCoverageEnable = VK_FALSE,
-			.alphaToOneEnable = VK_FALSE // see multisample coverage
-		};
-
-		// -- VkPipelineDepthStencilCreateInfo specifies depth/stencil state when access, rasterization and render of depth/stencil buffers are enabled
-		VkPipelineDepthStencilStateCreateInfo const graphicsPipelineDepthStencilStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0, // extension order attachment access? TODO 
-			.depthTestEnable = VK_FALSE,// VK_TRUE,
-			.depthWriteEnable = VK_FALSE, //VK_TRUE,
-			.depthCompareOp = VK_COMPARE_OP_LESS,
-			.depthBoundsTestEnable = VK_FALSE, // enables DEPTH BOUND TEST, requires depth test. You specify a range with min and max, and any depth value outside that range will fail the test 
-			.stencilTestEnable = VK_FALSE, // TODO enable stencil test
-			.front = VkStencilOpState{},
-			.back = VkStencilOpState{},
-			.minDepthBounds = 0.f,
-			.maxDepthBounds = 0.f
-		};
-
-		// -- VkPipelineColorBlendStateCreateInfo specifies how color outputs of the fragment stage will be blended and manages the blend state. All of this requires of course a color attachment
-		// Blending is only defined for floating-point, UNORM, SNORM, and sRGB formats. Within those formats, the implementation may only support blending on some subset of them. Which formats support blending is indicated by
-		// VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT
 		VkPipelineColorBlendAttachmentState const colorBlendAttachmentStates[] {
 			{
 				.blendEnable = VK_TRUE,
@@ -1521,41 +1506,28 @@ namespace mxc
 			}
 		};
 
-		VkPipelineColorBlendStateCreateInfo const graphicsPipelineColorBlendStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0, // extension rasterization order attachment access
-			.logicOpEnable = VK_FALSE, // enables a logic operation instead of a mathematical operation to perform blending. No. we want linear interpolation alpha_dest * c_dest + (1-alpha_dest) * c_src, also requires logicOp feature
-			.logicOp = VkLogicOp{},
-			.attachmentCount = 1u, // WARNING POSSIBLE ERROR we will perform blending only on color
-			.pAttachments = colorBlendAttachmentStates,
-			.blendConstants = {} // array of constant values specifying factors for 3 color components + alpha 
-		};
+		VulkanPipelineConfig graphicsPipelineConfig;
+		graphicsPipelineConfig.rasterizationStateCI.frontFace = VK_FRONT_FACE_CLOCKWISE;
+		graphicsPipelineConfig.viewportStateCI.pViewports = &viewport;
+		graphicsPipelineConfig.viewportStateCI.pScissors = &scissor;
+		graphicsPipelineConfig.colorBlendStateCI.pAttachments = colorBlendAttachmentStates;
 
-		// -- VkPipelineDynamicStateCreateInfo defines which properties of the pipeline state objects are dynamic and can be changed after the pipeline's creation. TODO set it up for resizeable screen. Can be null
-		VkPipelineDynamicStateCreateInfo const graphicsPipelineDynamicStateCI {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-			.pNext = nullptr,// no exts here for now Constructs the container with count
-			.flags = 0, // no flags here for now
-			.dynamicStateCount = 0, // TODO setup framebuffer/surface/viewport/scissor size to be dynamic so that the window is resizeable
-			.pDynamicStates = nullptr
-		};
-
-		// finally assemble the graphics pipeline
+		// TODO setup pipeline cache
+		// -- finally assemble the graphics pipeline ------------------------------------------------------------------------------------------------
 		VkGraphicsPipelineCreateInfo const graphicsPipelineCreateInfo {
 			.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 			.pNext = nullptr, // TODO you have no idea how many extension structures and flags there are
 			.flags = 0,
 			.stageCount = 2, // TODO change that
 			.pStages = graphicsPipelineShaderStageCIs,
-			.pVertexInputState = &graphicsPipelineVertexInputStateCI,
-			.pInputAssemblyState = &graphicsPipelineInputAssemblyStateCI,
-			.pTessellationState = &graphicsPipelineTessellationStateCI,
-			.pViewportState = &graphicsPipelineViewportStateCI,
-			.pRasterizationState = &graphicsPipelineRasterizationStateCI,
-			.pMultisampleState = &graphicsPipelineMultisampleStateCI,
-			.pDepthStencilState = &graphicsPipelineDepthStencilStateCI,
-			.pColorBlendState = &graphicsPipelineColorBlendStateCI,
+			.pVertexInputState = &graphicsPipelineConfig.vertexInputStateCI,
+			.pInputAssemblyState = &graphicsPipelineConfig.inputAssemblyStateCI,
+			.pTessellationState = &graphicsPipelineConfig.tessellationStateCI,
+			.pViewportState = &graphicsPipelineConfig.viewportStateCI,
+			.pRasterizationState = &graphicsPipelineConfig.rasterizationStateCI,
+			.pMultisampleState = &graphicsPipelineConfig.multisampleStateCI,
+			.pDepthStencilState = &graphicsPipelineConfig.depthStencilStateCI,
+			.pColorBlendState = &graphicsPipelineConfig.colorBlendStateCI,
 			.layout = m_graphicsPipelineLayout,
 			.renderPass = m_renderPass,
 			.subpass = 0, // subpass index in the renderpass. A pipeline will execute 1 subpass only.
@@ -1572,25 +1544,335 @@ namespace mxc
 			&m_graphicsPipeline
 		); // TODO enable pipeline caching, TODO do not hardcode pipeline number
 
-	#ifndef APP_USE_STRING_DEBUG
-		free(shadersBuf);
-	#endif
+		// -- cleanup ----------------------------------------------------------------------------------------------
 		shaderStreams[0].close();
 		shaderStreams[1].close();
 		for (uint32_t i = 0u; i < MXC_RENDERER_SHADERS_COUNT; ++i)
 			vkDestroyShaderModule(m_device, shaders[i], /*VkAllocationCallbacks**/nullptr);
+		
 		m_progressStatus |= GRAPHICS_PIPELINE_CREATED;
 		printf("pipeline created!\n");
 		return APP_SUCCESS;
 	}
 
+//	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
+//	{
+//		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
+//
+//		// creation of all information about pipeline steps: layout, and then in order of execution
+//		// -- pipeline layout TODO update when adding descriptor sets --------------------------------------------------------------------------------------------------------------
+//		VkPipelineLayoutCreateInfo const graphicsPipelineLayoutCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0, // there is only 1 and requires an extension
+//			.setLayoutCount = 0, // TODO change, number of descriptor sets to include in the pipeline layout
+//			.pSetLayouts = nullptr, // TODO change, pointer to array of VkDescriptorSetLayout objects
+//			.pushConstantRangeCount = 0, // TODO change, number to push constant ranges (range = a part of push constant)
+//			.pPushConstantRanges = nullptr // TODO change
+//		};
+//
+//		VkResult res = vkCreatePipelineLayout(m_device, &graphicsPipelineLayoutCI, /*VkAllocationCallbacks**/nullptr, &m_graphicsPipelineLayout);
+//		if (res != VK_SUCCESS)
+//		{
+//			fprintf(stderr, "failed to create graphics pipeline layout!\n");
+//			return APP_GENERIC_ERR;
+//		}
+//		printf("created graphics pipeline layout\n");
+//		m_progressStatus |= GRAPHICS_PIPELINE_LAYOUT_CREATED;
+//
+//		// -- VkPipelineShaderStageCreateInfo describes the shaders to use in the graphics pipeline TODO number of stages hardcoded ----------------------------------------------------------------------------------------------
+//		// ---- creation of the shader modules
+//		// ------ evaluate file sizes
+//		namespace fs = std::filesystem;
+//		fs::path const relativeShaderPaths[MXC_RENDERER_SHADERS_COUNT] {"shaders/triangle.vert.spv","shaders/triangle.frag.spv"};// TODO hardcode of shaders numbers
+//		fs::path const shaderPaths[MXC_RENDERER_SHADERS_COUNT] = {fs::current_path() / relativeShaderPaths[0], fs::current_path() / relativeShaderPaths[1]}; 
+//		std::error_code ecs[MXC_RENDERER_SHADERS_COUNT];
+//		size_t const shaderSizes[MXC_RENDERER_SHADERS_COUNT] {fs::file_size(shaderPaths[0], ecs[0]), fs::file_size(shaderPaths[1], ecs[1])}; // TODO check the error code, whose codes themselves are platform specific
+//		
+//		// ------ allocate char buffers to store shader binary data
+//		VectorCustom<char> shadersBuf[2];
+//		shadersBuf[0].resize(shaderSizes[0]);
+//		shadersBuf[1].resize(shaderSizes[1]);
+//		printf("current path is %s\nshader path of vertex shader: %s\nshader path of fragment shader: %s\n", fs::current_path().c_str(), shaderPaths[0].c_str(), shaderPaths[1].c_str());
+//		std::ifstream shaderStreams[MXC_RENDERER_SHADERS_COUNT] {std::ifstream(shaderPaths[0]), std::ifstream(shaderPaths[1])};
+//		if (!shaderStreams[0].is_open() || !shaderStreams[0].is_open())
+//		{
+//			fprintf(stderr, "failed to open shader files whyyyyyyyyyyyyyyyyyyyyyyyy\n");
+//			return APP_GENERIC_ERR;
+//		}
+//		shaderStreams[0].read(shadersBuf[0].data(), shaderSizes[0]);
+//		shaderStreams[1].read(shadersBuf[1].data(), shaderSizes[1]);
+//
+//		printf("vector sizes are %u and %u\n", shadersBuf[0].size(), shadersBuf[1].size());
+//		assert(shadersBuf[0].size() != 0 && shadersBuf[1].size() != 0);
+//
+//		VkShaderModuleCreateInfo const shaderModuleCreateInfos[MXC_RENDERER_SHADERS_COUNT] {
+//			{ // Vertex Shader Module Create Info
+//				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+//				.pNext = nullptr,
+//				.flags = 0,
+//				.codeSize = shaderSizes[0],
+//				.pCode = reinterpret_cast<uint32_t*>(shadersBuf[0].data())
+//			},
+//			{ // Fragment Shader Module Create Info
+//				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+//				.pNext = nullptr,
+//				.flags = 0,
+//				.codeSize = shaderSizes[1],
+//				.pCode = reinterpret_cast<uint32_t*>(shadersBuf[1].data())
+//			}
+//		};
+//
+//		VkShaderModule shaders[MXC_RENDERER_SHADERS_COUNT] = {VK_NULL_HANDLE};
+//		if ( vkCreateShaderModule(m_device, &shaderModuleCreateInfos[0],/*VkAllocationCallbacks**/nullptr, &shaders[0]) != VK_SUCCESS 
+//			|| vkCreateShaderModule(m_device, &shaderModuleCreateInfos[1], /*VkAllocationCallbacks**/nullptr, &shaders[1]) != VK_SUCCESS)
+//		{
+//			vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
+//			return APP_GENERIC_ERR;
+//		}
+//
+//		// ---- creation of the information structure
+//		VkPipelineShaderStageCreateInfo const graphicsPipelineShaderStageCIs[MXC_RENDERER_SHADERS_COUNT] {
+//			VkPipelineShaderStageCreateInfo{ // VERTEX SHADER
+//				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+//				.pNext = nullptr, // TODO
+//				.flags = 0, // all of the flags regard SUBGROUPS, a group of tasks running in parallel in a compute unit (warp or wavefront). Too advanced TODO future
+//				.stage = VK_SHADER_STAGE_VERTEX_BIT,
+//				.module = shaders[0],
+//				.pName = "main",
+//				.pSpecializationInfo = nullptr// sepcialization constants are a mechanism to specify in a SPIR-V module constant values at pipeline creation time, which can be modified while executing the application TODO later
+//			},
+//			VkPipelineShaderStageCreateInfo{ // FRAGMENT SHADER
+//				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+//				.pNext = nullptr,
+//				.flags = 0,
+//				.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+//				.module = shaders[1],
+//				.pName = "main",
+//				.pSpecializationInfo = nullptr
+//			}
+//		};
+//
+//		// -- VkPipelineVertexInputStateCreateInfo -------------------------------------------------------------------------------------------------------------------------------------------------------------
+//		// describes the vertices to be passed, without actually passing the data (number, stride, buffer to data). Ignored if Mesh shader is used
+//		// ---- Creation of VkVertexAttributeDescriptions(in which bindings is the vertex data distributed?) 
+//		//		and of VkVertexInputAttributeDescription(in which layout is each vertex in each of the bindings formatted?)
+//		VkVertexInputBindingDescription const vertInputBindingDescriptions[] {
+//			{
+//				.binding = 0, // Binding number which this structure is describing. You need a description for each binding in use. TODO we have no binding now
+//				.stride = 0, // distance between successive elements in bytes (if attributes are stored interleaved, per vert, then stride = sizeof(Vertex))
+//				.inputRate = VK_VERTEX_INPUT_RATE_VERTEX // VkVertexInputRate specifies whether attributes stored in the buffer are PER VERTEX or PER INSTANCE
+//			}
+//		};
+//
+//		VkVertexInputAttributeDescription const vertInputAttributeDescriptions[] { // TODO for now I have no attributes but just setting up the skeleton for future use
+//			{
+//				.location = 0,
+//				.binding = 0,
+//				.format = VK_FORMAT_R32G32B32_SFLOAT, // VkFormat
+//				.offset = 0 // in bytes, from the start of the current element
+//			}
+//		};
+//
+//		VkPipelineVertexInputStateCreateInfo const graphicsPipelineVertexInputStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0,
+//			.vertexBindingDescriptionCount = 0, // TODO change this when you add some vertex attributes
+//			.pVertexBindingDescriptions = vertInputBindingDescriptions,
+//			.vertexAttributeDescriptionCount = 0,
+//			.pVertexAttributeDescriptions = vertInputAttributeDescriptions
+//		};
+//
+//		// -- VkPipelineInputAssemblyStateCreateInfo specifies behaviour of the input assembly stage, i.e. vertex attributes, topology,...
+//		// with topology triangle list we specify each triangle separately. This means duplicate data for adjacent triangles, but it is the easier to start with. others include point list/strip, line list/strip, triangle list/strip/fan, (these 3,except fan, with or without adjacency(which means that some verts specifies an ADJACENCY EDGE, an edge not displayed whose points are accessible only to geo shader. purpose=primitive processing)), or patch list(see bezier curves, vertices are control points)
+//		VkPipelineInputAssemblyStateCreateInfo const graphicsPipelineInputAssemblyStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0,
+//			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,// chooses a PRIMITIVE TOPOLOGY, ie how consequent vertices are arranged in primitives during input assembly and kept up to the rasterization stage(if not altered by tesselation and/or geometry shader). In case of mesh shader, it is the latter that defines the topology used.
+//			.primitiveRestartEnable = VK_FALSE // allows restart of topology (there are some topologies which can take as many verts and create a continuous mesh), and it will do that if, DURING INDEXED DRAWS(ONLY), the special value 0xfff...(number of f's depends on index type). Discards vertices of incomplete primitive (eg first of the 2 verts required to continue triangle strip)
+//		};
+//
+//		// -- VkPipelineTessellationStateCreateInfo specifies the tessellation state used by the tessellation shaders, TODO future
+//		VkPipelineTessellationStateCreateInfo const graphicsPipelineTessellationStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+//			.pNext = nullptr, // NULL or to an instance of domain origin state create info
+//			.flags = 0,
+//			.patchControlPoints = 0 // number of control points per patch. TODO we are not going to use tessellation for now
+//		};
+//
+//		// TODO dynamic state
+//		// -- VkPipelineViewportStateCreateInfo defines the window viewport, i.e. an rectangle+a set of scissors. NUM. SCISSORS = NUM. VIEWPORTS < VkPhysicalDeviceLimits::maxViewports
+//		VkViewport const viewport {
+//			.x = 0.f,// x,y define the upper-left corner of the viewport in screen coordinates. x,y must be >= viewportBoundsRange[0], x+width,y+height <= viewportBoundsRange[1]. they are VkPhysicalDeviceLimits
+//			.y = 0.f,
+//			.width = static_cast<float>(m_surfaceExtent.width), // width, height are the viewport's width and height. MUST BE LESS THAN the maximum specified in the device limits(in the device properties) // TODO setup checks TODO TODO important
+//			.height = static_cast<float>(m_surfaceExtent.height),
+//			.minDepth = 0.f, // viewport's width and height. min can be bigger than max (what even is the result then?), for values out of the range [0.f,1.f], you need extension depth_range_unrestricted
+//			.maxDepth = 1.f
+//		};
+//
+//		VkRect2D const scissor {
+//			.offset = {0, 0}, // VkOffset type, has 2 SIGNED integers
+//			.extent = m_surfaceExtent // VkExtent type, has 2 UNSIGNED integers
+//		};
+//
+//		VkPipelineViewportStateCreateInfo const graphicsPipelineViewportStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+//			.pNext = nullptr, 
+//			.flags = 0,
+//			.viewportCount = 1, // greater than 1 requires multiviewport extension
+//			.pViewports = &viewport,
+//			.scissorCount = 1,
+//			.pScissors = &scissor
+//		};
+//
+//		// -- VkPipelineRasterizationStateCreateInfo specifies how the vertices will be rasterized, and stores the rasterization state
+//		VkPipelineRasterizationStateCreateInfo const graphicsPipelineRasterizationStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+//			.pNext = nullptr, // lots of extensions here
+//			.flags = 0,
+//			.depthClampEnable = VK_FALSE, // whether or not to enable depth clamp, i.e. anything with depth resulting from the depth test > farplane(1)
+//			.rasterizerDiscardEnable = VK_FALSE, // are primitives discarded just before rasterization (no image produced), used only if you want to achieve some computation on vertex data, e.g. physics or animation
+//			.polygonMode = VK_POLYGON_MODE_FILL, // TRIANGLE RENDERING MODE, this has nothing to do with the primitive topology, which defines how we want to GROUP vertex data to process and IDENTIFY SEPARATE OBJECTS. Here, we want to define if we want to color the points of each triangle, lines, or fill them completely
+//			.cullMode = VK_CULL_MODE_BACK_BIT,// which face/faces of triangle to hide and which to display, relates to TRIANGLE WINDING, we want to setup the CCW orientation as front face, and cull the back face
+//			.frontFace = VK_FRONT_FACE_CLOCKWISE, // TODO introduce transforms and swap this back to counter clockwise winding for front face
+//			.depthBiasEnable = VK_FALSE, // TODO later, when doing shadow maps
+//			.depthBiasConstantFactor = 0.f,
+//			.depthBiasClamp = 0.f,
+//			.depthBiasSlopeFactor = 0.f,
+//			.lineWidth = 1.f,
+//		};
+//
+//		// -- VkPipelineMultisampleStateCreateInfo structure defining multisampling state when multisampling is used
+//		VkPipelineMultisampleStateCreateInfo const graphicsPipelineMultisampleStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0,
+//			.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, // number of samples used in the rasterization
+//			.sampleShadingEnable = VK_FALSE, // see sample shading TODO later
+//			.minSampleShading = 0.f, // disabled if no sample shading
+//			.pSampleMask = nullptr, // disabled 
+//			.alphaToCoverageEnable = VK_FALSE,
+//			.alphaToOneEnable = VK_FALSE // see multisample coverage
+//		};
+//
+//		// TODO see stencil test
+//		// -- VkPipelineDepthStencilCreateInfo specifies depth/stencil state when access, rasterization and render of depth/stencil buffers are enabled
+//		VkStencilOpState constexpr stencilOpState {
+//				// The stencil test is controlled by one of two sets of stencil-related state, the front stencil state and the back stencil state. 
+//				// Stencil tests and writes use the back stencil state when processing fragments generated by back-facing polygons, and the front stencil state when processing fragments generated by front-facing polygons or any other primitives.
+//				.failOp = VK_STENCIL_OP_KEEP, // what to do if stencil test fails
+//				.passOp = VK_STENCIL_OP_KEEP, // what to do if stencil test is successful
+//				.depthFailOp = VK_STENCIL_OP_KEEP, // passes stencil but fails depth test
+//				.compareOp = VK_COMPARE_OP_ALWAYS, // specifies stencil test operation. same type as depth comparison, but with another meaning
+//				.compareMask = 0, // selects the bits of the unsigned integer values participating in the stencil test
+//				.writeMask = 0, // selects the bits of the unsigned integer values updated by the stencil test in the stencil framebuffer attachment
+//				.reference = 0 // integer stencil reference value used in some of the compare ops
+//			}
+//		VkPipelineDepthStencilStateCreateInfo const graphicsPipelineDepthStencilStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0, // extension order attachment access? TODO 
+//			.depthTestEnable = VK_FALSE,// VK_TRUE,
+//			.depthWriteEnable = VK_FALSE, //VK_TRUE,
+//			.depthCompareOp = VK_COMPARE_OP_LESS,
+//			.depthBoundsTestEnable = VK_FALSE, // enables DEPTH BOUND TEST, requires depth test. You specify a range with min and max, and any depth value outside that range will fail the test 
+//			.stencilTestEnable = VK_FALSE, // TODO enable stencil test
+//			.front = stencilOpState,
+//			.back = stencilOpState,
+//			.minDepthBounds = 0.f,
+//			.maxDepthBounds = 0.f
+//		};
+//
+//		// -- VkPipelineColorBlendStateCreateInfo specifies how color outputs of the fragment stage will be blended and manages the blend state. All of this requires of course a color attachment
+//		// Blending is only defined for floating-point, UNORM, SNORM, and sRGB formats. Within those formats, the implementation may only support blending on some subset of them. Which formats support blending is indicated by
+//		// VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT
+//		// formula = srcAlpha * srcCol + (1 - srcAlpha) * dstCol, where src = new fragment, dst = old fragment 
+//		VkPipelineColorBlendAttachmentState const colorBlendAttachmentStates[] {
+//			{
+//				.blendEnable = VK_TRUE,
+//				.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+//				.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+//				.colorBlendOp = VK_BLEND_OP_ADD,
+//				.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+//				.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+//				.alphaBlendOp = VK_BLEND_OP_ADD,
+//				.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT // specifies which components of the color has to be written alfter blending
+//			}
+//		};
+//
+//		VkPipelineColorBlendStateCreateInfo const graphicsPipelineColorBlendStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+//			.pNext = nullptr,
+//			.flags = 0, // extension rasterization order attachment access
+//			.logicOpEnable = VK_FALSE, // enables a logic operation instead of a mathematical operation to perform blending. No. we want linear interpolation alpha_dest * c_dest + (1-alpha_dest) * c_src, also requires logicOp feature
+//			.logicOp = VkLogicOp{},
+//			.attachmentCount = 1u, // WARNING POSSIBLE ERROR we will perform blending only on color
+//			.pAttachments = colorBlendAttachmentStates,
+//			.blendConstants = {} // array of constant values specifying factors for 3 color components + alpha 
+//		};
+//
+//		// -- VkPipelineDynamicStateCreateInfo defines which properties of the pipeline state objects are dynamic and can be changed after the pipeline's creation. TODO set it up for resizeable screen. Can be null
+//		VkPipelineDynamicStateCreateInfo const graphicsPipelineDynamicStateCI {
+//			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+//			.pNext = nullptr,// no exts here for now Constructs the container with count
+//			.flags = 0, // no flags here for now
+//			.dynamicStateCount = 0, // TODO setup framebuffer/surface/viewport/scissor size to be dynamic so that the window is resizeable
+//			.pDynamicStates = nullptr
+//		};
+//
+//		// TODO setup pipeline cache
+//		// -- finally assemble the graphics pipeline ------------------------------------------------------------------------------------------------
+//		VkGraphicsPipelineCreateInfo const graphicsPipelineCreateInfo {
+//			.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+//			.pNext = nullptr, // TODO you have no idea how many extension structures and flags there are
+//			.flags = 0,
+//			.stageCount = 2, // TODO change that
+//			.pStages = graphicsPipelineShaderStageCIs,
+//			.pVertexInputState = &graphicsPipelineVertexInputStateCI,
+//			.pInputAssemblyState = &graphicsPipelineInputAssemblyStateCI,
+//			.pTessellationState = &graphicsPipelineTessellationStateCI,
+//			.pViewportState = &graphicsPipelineViewportStateCI,
+//			.pRasterizationState = &graphicsPipelineRasterizationStateCI,
+//			.pMultisampleState = &graphicsPipelineMultisampleStateCI,
+//			.pDepthStencilState = &graphicsPipelineDepthStencilStateCI,
+//			.pColorBlendState = &graphicsPipelineColorBlendStateCI,
+//			.layout = m_graphicsPipelineLayout,
+//			.renderPass = m_renderPass,
+//			.subpass = 0, // subpass index in the renderpass. A pipeline will execute 1 subpass only.
+//			.basePipelineHandle = VK_NULL_HANDLE, // recycle old pipeline, requires PIPELINE_DERIVATIVES flag.
+//			.basePipelineIndex = 0 // doesn't count if basePipelineHandle is VK_NULL_HANDLE
+//		};
+//
+//		res = vkCreateGraphicsPipelines(
+//			m_device,
+//			VK_NULL_HANDLE, // VkPipelineCache
+//			1, // createInfoCount
+//			&graphicsPipelineCreateInfo,
+//			nullptr, // VkAllocationCallbacks*
+//			&m_graphicsPipeline
+//		); // TODO enable pipeline caching, TODO do not hardcode pipeline number
+//
+//		// -- cleanup ----------------------------------------------------------------------------------------------
+//		shaderStreams[0].close();
+//		shaderStreams[1].close();
+//		for (uint32_t i = 0u; i < MXC_RENDERER_SHADERS_COUNT; ++i)
+//			vkDestroyShaderModule(m_device, shaders[i], /*VkAllocationCallbacks**/nullptr);
+//		
+//		m_progressStatus |= GRAPHICS_PIPELINE_CREATED;
+//		printf("pipeline created!\n");
+//		return APP_SUCCESS;
+//	}
+
 	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSynchronizationObjects() & -> status_t
 	{
 		assert((m_progressStatus & DEVICE_CREATED) && "device is required to create synchronization primitives!\n");
 		
-		m_fenceInFlightFrame.resize(m_swapchainImagesCnt);
-		m_semaphoreImageAvailable.resize(m_swapchainImagesCnt);
-		m_semaphoreRenderFinished.resize(m_swapchainImagesCnt);
+		m_fenceInFlightFrame.resize(m_swapchainImages.size());
+		m_semaphoreImageAvailable.resize(m_swapchainImages.size());
+		m_semaphoreRenderFinished.resize(m_swapchainImages.size());
 
 		VkFenceCreateInfo const fenceCreateInfo {
 			.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -1611,9 +1893,9 @@ namespace mxc
 			.flags = 0 // none for now
 		};
 
-		uint16_t created[m_swapchainImagesCnt] = {};
+		uint16_t created[m_swapchainImages.size()] = {};
 		VkResult res;
-		for (uint32_t i = 0u; i < m_swapchainImagesCnt; ++i)
+		for (uint32_t i = 0u; i < m_swapchainImages.size(); ++i)
 		{
 			res = vkCreateFence(m_device, &fenceCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_fenceInFlightFrame[i]);
 			if (res != VK_SUCCESS)
@@ -1652,7 +1934,7 @@ namespace mxc
 
 	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::recordCommands(uint32_t framebufferIdx) & -> status_t
 	{
-		assert(framebufferIdx < m_swapchainImagesCnt && "framebuffer index out of bounds");
+		assert(framebufferIdx < m_swapchainImages.size() && "framebuffer index out of bounds");
 		assert((m_progressStatus & (GRAPHICS_PIPELINE_CREATED | COMMAND_BUFFER_ALLOCATED)) && "command buffer recording requires a pipeline and a command buffer!\n");
 
 		// should be called begin RECORDING, we are not executing any command here
@@ -1662,23 +1944,25 @@ namespace mxc
 			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,// we have 3: one time submit = buffer will be reset after first use, render pass continue = for secondary cmd bufs only, specifies that this 2ndary cmd buf is entirely in renderpass, simultaneous use = allows to resubmit buffer to a queue while it is in the pending state, aka not finished
 			.pInheritanceInfo = nullptr // used if this is a secondary buffer, defines the state that the secondary buffer will inherit from primary command buffer (render pass, subpass, framebuffer, and pipeline statistics)
 		};
+		VkClearValue const clearValues[] {
+			// color attachment
+			{.color = VkClearColorValue{0.3f, 0.3f, 0.3f, 1.f}},
+			// depth attachment
+			{.depthStencil = VkClearDepthStencilValue{.depth = 0.f, .stencil = 0u}} // stencil value ignored
+		};
+		VkRenderPassBeginInfo const renderPassBeginInfo {
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+			.pNext = nullptr, // can be stuff for device groups
+			.renderPass = m_renderPass,
+			.framebuffer = m_framebuffers[framebufferIdx],
+			.renderArea = VkRect2D{VkOffset2D{0,0}, m_surfaceExtent},
+			.clearValueCount = 2u, // array of clear colors, used if in the subpass the loadOp and/or stencilLoadOp was specified as VK_ATTACHMENT_LOAD_OP_CLEAR, there is one clear color for each attachment, AND THE ARRAY IS INDEXED BY THE ATTACHMENT NUMBER, so there can be holes
+			.pClearValues = clearValues // using clear values for color attachment and depth attachment, to clear buffer values in the command buffer use vkCmdFillBuffer
+		};
+
 		vkBeginCommandBuffer(m_graphicsCmdBufs[framebufferIdx], &cmdBufBeginInfo); // TODO rework when command buffers become > 1
 		{
-			VkClearValue const clearValues[] {
-				// color attachment
-				{.color = VkClearColorValue{0.3f, 0.3f, 0.3f, 1.f}},
-				// depth attachment
-				{.depthStencil = VkClearDepthStencilValue{.depth = 0.f, .stencil = 0u}} // stencil value ignored
-			};
-			VkRenderPassBeginInfo const renderPassBeginInfo {
-				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-				.pNext = nullptr, // can be stuff for device groups
-				.renderPass = m_renderPass,
-				.framebuffer = m_framebuffers[framebufferIdx],
-				.renderArea = VkRect2D{VkOffset2D{0,0}, m_surfaceExtent},
-				.clearValueCount = 2u, // array of clear colors, used if in the subpass the loadOp and/or stencilLoadOp was specified as VK_ATTACHMENT_LOAD_OP_CLEAR, there is one clear color for each attachment, AND THE ARRAY IS INDEXED BY THE ATTACHMENT NUMBER, so there can be holes
-				.pClearValues = clearValues // using clear values for color attachment and depth attachment, to clear buffer values in the command buffer use vkCmdFillBuffer
-			};
+
 			vkCmdBeginRenderPass(m_graphicsCmdBufs[framebufferIdx], &renderPassBeginInfo, /*VkSubpassContents*/VK_SUBPASS_CONTENTS_INLINE); // inline = no secondary buffers are executed in each subpass, while secondary means that subpass is recorded in a secondary command buffer
 			{
 				// bind graphics pipeline to render pass
@@ -1772,7 +2056,7 @@ namespace mxc
 		}
 
 		//printf("currentFramebuffer = %u\n", currentFramebuffer);
-		currentFramebuffer = (currentFramebuffer + 1) % m_swapchainImagesCnt;
+		currentFramebuffer = (currentFramebuffer + 1) % m_swapchainImages.size();
 		return APP_SUCCESS;
 	}
 
