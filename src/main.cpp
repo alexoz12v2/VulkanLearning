@@ -82,11 +82,6 @@ bool operator!=(const Mallocator <T>&, const Mallocator <U>&) { return false; }
 
 namespace mxc
 {
-	// GLFW and Vulkan uses 32 bit unsigned int as bool, i'll provide my definition as well
-	using bool32_t = uint32_t;
-	#define APP_FALSE 0
-	#define APP_TRUE 1
-
 	using status_t = uint32_t;
 	#define APP_SUCCESS 0
 	#define APP_GENERIC_ERR 1
@@ -97,6 +92,7 @@ namespace mxc
 	#define APP_DEVICE_CREATION_ERR 6
 	#define APP_SWAPCHAIN_CREATION_ERR 7
 	#define APP_VK_ALLOCATION_ERR 8
+	#define APP_REQUIRES_RESIZE_ERR 9
 	//... more errors
 	
 	// TODO change return conventions into more meaningful and specific error carrying type to convey a more 
@@ -132,9 +128,9 @@ namespace mxc
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
 			.pNext = nullptr, 
 			.flags = 0,
-			.viewportCount = 1,
+			.viewportCount = 0,
 			.pViewports = nullptr,
-			.scissorCount = 1,
+			.scissorCount = 0,
 			.pScissors = nullptr 
 		};
 
@@ -211,29 +207,37 @@ namespace mxc
 	};
 
 	template <template<class> class AllocTemplate = std::allocator>
-	class renderer
+	class Renderer
 	{
 	public: // type shortcuts
 		template <typename T>
 		using VectorCustom = std::vector<T, AllocTemplate<T>>;
 
 	public: // constructors
-		renderer();
-		renderer(renderer const&) = delete;
-		auto operator=(renderer const&) -> renderer = delete;
+		Renderer();
+		Renderer(Renderer const&) = delete;
+		auto operator=(Renderer const&) -> Renderer = delete;
 		// TODO define move semantics
-		~renderer();
+		~Renderer();
 		
 	public: // public functions, initialization procedures
 		// TODO refactor so that you take a raw array. it is too restrictive to constraint api caller to use a specific class data structure
 		auto init(std::span<char const*> desiredInstanceExtensions, 
 				  std::span<char const*> desiredDeviceExtensions, 
-				  GLFWwindow* window) & -> status_t; // TODO init arguments refactored in a customizeable struct
+				  GLFWwindow* window, uint32_t width, uint32_t height) & -> status_t; 
+		// TODO init arguments refactored in a customizeable struct, create swapchain only if requested, and create a window class
+		auto draw() & -> status_t;
+		auto resize(uint32_t width, uint32_t height) & -> status_t; // TODO recreate swapchain only if swapchain has been requested
+
+	public: // public function, utilities
+		auto progress_incomplete() const & -> status_t; // TODO: const correct and ref correct members
+
+	private: // setup vulkan objects functions, called by init
 		auto setupInstance(std::span<char const*> const& desiredExtensions) & -> status_t;
 		auto setupSurfaceKHR(GLFWwindow* window) & -> status_t; // TODO refactor
 		auto setupPhyDevice(std::span<char const*> const& desiredDeviceExtensions) -> status_t;
 		auto setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t;
-		auto setupSwapchain() & -> status_t;
+		auto setupSwapchain(uint32_t width, uint32_t height) & -> status_t;
 		auto setupCommandBuffers() & -> status_t;
 		// auto setupStagingBuffer() & -> status_t;
 		auto setupDepthImage() & -> status_t;
@@ -243,11 +247,7 @@ namespace mxc
 		auto setupGraphicsPipeline() & -> status_t;
 		auto recordCommands(uint32_t framebufferIdx) & -> status_t;
 		auto setupSynchronizationObjects() & -> status_t;
-		auto draw() & -> status_t;
 
-	public: // public function, utilities
-		auto progress_incomplete() const & -> status_t; // TODO: const correct and ref correct members
-												  
 	private: // data members, dispatchable and non dispatchable vulkan objects handles
 		// vulkan initialization members
 		VkInstance m_instance;
@@ -275,10 +275,10 @@ namespace mxc
 
 		VkRenderPass m_renderPass;
 		// color output attachment and depth output attachment
-		#define MXC_RENDERER_ATTACHMENT_COUNT 1
-		//VkImage m_depthImage;
-		//VkImageView m_depthImageView;
-		//VkDeviceMemory m_depthImageMemory;
+		#define MXC_RENDERER_ATTACHMENT_COUNT 2
+		VkImage m_depthImage;
+		VkImageView m_depthImageView;
+		VkDeviceMemory m_depthImageMemory;
 
 		// cmdbuf count = framebuffer count = swapchain images count = semaphores count = fences count
 		VectorCustom<VkFramebuffer> m_framebuffers; // triple buffering
@@ -303,7 +303,7 @@ namespace mxc
 		VkExtent2D m_surfaceExtent;
 
 		// other vulkan related
-		//VkFormat m_depthImageFormat;
+		VkFormat m_depthImageFormat;
 
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 		VkDebugUtilsMessengerEXT m_dbgMessenger;
@@ -330,8 +330,8 @@ namespace mxc
 			SWAPCHAIN_IMAGE_VIEWS_CREATED = 0x01000000,
 			COMMAND_BUFFER_ALLOCATED = 0x00800000,
 			RENDERPASS_CREATED = 0x00200000,
-			//DEPTH_IMAGE_CREATED = 0x00100000,
-			//DEPTH_MEMORY_ALLOCATED = 0x00008000,
+			DEPTH_IMAGE_CREATED = 0x00100000,
+			DEPTH_MEMORY_ALLOCATED = 0x00008000,
 			FRAMEBUFFERS_CREATED = 0x00080000,
 			GRAPHICS_PIPELINE_LAYOUT_CREATED = 0x00040000,
 			GRAPHICS_PIPELINE_CREATED = 0x00020000,
@@ -346,35 +346,34 @@ namespace mxc
 		#endif
 	};
 
-	template <template<class> class AllocTemplate> renderer<AllocTemplate>::renderer() 
+	template <template<class> class AllocTemplate> Renderer<AllocTemplate>::Renderer() 
 			: m_instance(VK_NULL_HANDLE), m_phyDevice(VK_NULL_HANDLE), m_device(VK_NULL_HANDLE)
 			, m_queueIdxArr{-1}, m_queues{VK_NULL_HANDLE} // TODO Don't forget to update m_queueIdxArr when adding queue types
 			, m_graphicsCmdPool(VK_NULL_HANDLE), m_graphicsCmdBufs(VectorCustom<VkCommandBuffer>(0)), m_renderPass(VK_NULL_HANDLE)
 			, m_framebuffers(VectorCustom<VkFramebuffer>()), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
-			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>())//, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
-			, /*m_depthImageMemory(VK_NULL_HANDLE),*/ m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
+			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>()), m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
+			, m_depthImageMemory(VK_NULL_HANDLE), m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
 			, m_swapchain(VK_NULL_HANDLE), m_swapchainImages(VectorCustom<VkImage>()), m_swapchainImageViews(VectorCustom<VkImageView>())
-			, m_surfaceExtent(VkExtent2D{0,0})//, m_depthImageFormat(VK_FORMAT_D32_SFLOAT)
+			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT)
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 			, m_dbgMessenger(VK_NULL_HANDLE)
 #endif
 			, m_progressStatus(0u)
 	{
 	}				
-
-	template <template<class> class AllocTemplate> 
-	auto renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
+template <template<class> class AllocTemplate> 
+	auto Renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
 									   std::span<char const*> desiredDeviceExtensions,
-									   GLFWwindow* window) & -> status_t
+									   GLFWwindow* window, uint32_t width, uint32_t height) & -> status_t
 	{
 		if (setupInstance(desiredInstanceExtensions)
 			|| setupSurfaceKHR(window) // TODO work in progress, refactor to another class, like "rendererWindowAdaptor" to make renderer and window loosely coupled
 			|| setupPhyDevice(desiredDeviceExtensions)
 			|| setupDeviceAndQueues(desiredDeviceExtensions)
-			|| setupSwapchain()
+			|| setupSwapchain(width, height)
 			|| setupCommandBuffers()
-			//|| setupDepthImage()
-			//|| setupDepthDeviceMemory()
+			|| setupDepthImage()
+			|| setupDepthDeviceMemory()
 			|| setupRenderPass()
 			|| setupFramebuffers()
 			|| setupGraphicsPipeline()
@@ -388,7 +387,7 @@ namespace mxc
 	}
 
 	template <template<class> class AllocTemplate> 
-	renderer<AllocTemplate>::~renderer()
+	Renderer<AllocTemplate>::~Renderer()
 	{
 		printf("time to destroy renderer!\n");
 		// wait until the device is idle to clean resources so we don't break anything with VkFences
@@ -415,17 +414,11 @@ namespace mxc
 			vkDestroyFramebuffer(m_device, m_framebuffers[i], /*VkAllocationCallbacks**/nullptr);
 		}
 		
-		//if (m_progressStatus & DEPTH_MEMORY_ALLOCATED)
-		//{
-		//	printf("remember to clean up device memory!\n");
-		//	vkFreeMemory(m_device, m_depthImageMemory, /*VkAllocationCallbacks**/nullptr);
-		//}
-		//
-		//if (m_progressStatus & DEPTH_IMAGE_CREATED)
-		//{
-		//	vkDestroyImageView(m_device, m_depthImageView, /*VkAllocationCallbacks**/nullptr);
-		//	vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
-		//}
+		// destroy depth buffer
+		printf("remember to clean up device memory!\n");
+		vkFreeMemory(m_device, m_depthImageMemory, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyImageView(m_device, m_depthImageView, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
 	
 		vkDestroyRenderPass(m_device, m_renderPass, /*VkAllocationCallbacks**/nullptr);
 	
@@ -496,7 +489,7 @@ namespace mxc
 
 	}
 	template <template<class> class AllocTemplate> 
-	auto renderer<AllocTemplate>::dbgPrintInstanceExtensionsAndLayers(std::span<char const*> const& instanceExtensions, std::span<char const*> const& layers) -> void
+	auto Renderer<AllocTemplate>::dbgPrintInstanceExtensionsAndLayers(std::span<char const*> const& instanceExtensions, std::span<char const*> const& layers) -> void
 	{
 		FILE* const file = fopen("./ext_and_layers_names.txt", "w");
 		if (file)
@@ -522,7 +515,7 @@ namespace mxc
 #endif // ifndef NDEBUG
 
 	template <template<class> class AllocTemplate> 
-	auto renderer<AllocTemplate>::setupInstance(std::span<char const*> const& desiredInstanceExtensions) & -> status_t
+	auto Renderer<AllocTemplate>::setupInstance(std::span<char const*> const& desiredInstanceExtensions) & -> status_t
 	{
      	// -- Check for vulkan 1.2 support ------------------------------------------------------------------
 		uint32_t supported_vk_api_version;
@@ -659,7 +652,7 @@ namespace mxc
 	}
 
 	template <template<class> class AllocTemplate> 
-	auto renderer<AllocTemplate>::setupPhyDevice(std::span<char const*> const& desiredDeviceExtensions) -> status_t
+	auto Renderer<AllocTemplate>::setupPhyDevice(std::span<char const*> const& desiredDeviceExtensions) -> status_t
 	{
 		assert(m_progressStatus & INSTANCE_CREATED);
 		assert(m_progressStatus & SURFACE_CREATED);
@@ -729,7 +722,7 @@ namespace mxc
 
 			// -- get and store the surface capabilities, an intersection between the display capabilities
 			//    and the physical device capabilities regarding presentation. Needed to create a swapchain ----------------------------------------------
-			vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevices[i], m_surface, &m_surfaceCapabilities);
+			// vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevices[i], m_surface, &m_surfaceCapabilities);
 			
 			// -- now check for surface format support, we want R8G8B8A8 format, with sRGB nonlinear colorspace. ------------------------------------------
 			// PS=there are more advanced query function to check for more specific features, 
@@ -828,7 +821,7 @@ namespace mxc
 	}
 	
 	template <template<class> class AllocTemplate> 
-	auto renderer<AllocTemplate>::setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t
+	auto Renderer<AllocTemplate>::setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t
 	{
 		assert(m_progressStatus & PHY_DEVICE_GOT);
 		// we can also map a device to multiple physical devices, a "device group", 
@@ -900,17 +893,14 @@ namespace mxc
 		// -- store queue handles --------------------------------------------------------------------------------------------------------------
 		for (uint32_t i = 0u; i < MXC_RENDERER_QUEUES_COUNT; ++i)
 		{
-			vkGetDeviceQueue(m_device, 
-							 m_queueIdx.graphics, 
-							 /*queue index within the family*/0u, // TODO change when supporting more than 1 queue within a queue family
-							 &m_queues[i]);
+			vkGetDeviceQueue(m_device, m_queueIdx.graphics, /*queue index within the family*/0u, &m_queues[i]);// TODO change when supporting more than 1 queue within a queue family
 		}
 
 		return APP_SUCCESS;
 	}
 
 	// TODO refactor
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSurfaceKHR(GLFWwindow* window) & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupSurfaceKHR(GLFWwindow* window) & -> status_t
 	{
 		// setup surface
 		if (VK_SUCCESS != glfwCreateWindowSurface(m_instance, window, /*VkAllocationCallbacks**/nullptr, &m_surface))
@@ -924,16 +914,20 @@ namespace mxc
 	}
 
 	// TODO for now will use composite alpha opaque
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSwapchain() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupSwapchain(uint32_t width, uint32_t height) & -> status_t
 	{
+		// -- get and store the surface capabilities, an intersection between the display capabilities
+		//    and the physical device capabilities regarding presentation. Needed to create a swapchain ----------------------------------------------
+		vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_phyDevice, m_surface, &m_surfaceCapabilities);
+			
 		// -- create swapchain ----------------------------------------------------------------------------------------------------------------
 		// TODO remove hardcoded window width and height when implementing dynamic viewport
 		// m_surfaceCapabilities.currentExtent, needed for swapchain creation, can contain either 
 		// the current width and height of the surface or the special value {0xfffffffff,0xffffffff), indicating
 		// that I can choose image size, which in such case will be the window size
 		m_surfaceExtent = {
-			.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH,
-			.height= m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
+			.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : width,
+			.height= m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : height
 		};
 
 		// if the graphics and presentation queue (TODO might change as these change) belong to the 
@@ -965,15 +959,18 @@ namespace mxc
 			.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, // type VkCompositeAlphaFlagBitsKHR, indicates which alpha compositing mode to use after fragment shader
 			.presentMode = m_presentModeUsed,
 			.clipped = VK_FALSE, // specifies whether to not execute fragment shader on not visible pixels due to other windows on top of the app or window partially out of display bounds (if set to VK_TRUE). NOTE TODO DO NOT SET IT TO TRUE IF YOU WILL FURTHER PROCESS THE CONTENT OF THE FRAMEBUFFER
-			.oldSwapchain = VK_NULL_HANDLE // special Vulkan object handle value specifying an invalid object
+			.oldSwapchain = m_swapchain // special Vulkan object handle value specifying an invalid object
 		};
 
-		VkResult res = vkCreateSwapchainKHR(m_device, &swapchainCreateInfo, /*vkAllocationCallbacks**/nullptr, &m_swapchain);
+		VkSwapchainKHR swapchain;
+		VkResult res = vkCreateSwapchainKHR(m_device, &swapchainCreateInfo, /*vkAllocationCallbacks**/nullptr, &swapchain);
 		if (res != VK_SUCCESS)
 		{
 			return APP_SWAPCHAIN_CREATION_ERR;
 		}
 
+		vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr);
+		m_swapchain = swapchain;
 		m_progressStatus |= SWAPCHAIN_CREATED;
 		printf("swapchain created!\n");
 
@@ -1024,7 +1021,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupCommandBuffers() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupCommandBuffers() & -> status_t
 	{
 		assert(m_progressStatus & DEVICE_CREATED && "command pools are child objects of devices, hence we need a device\n");
 
@@ -1068,127 +1065,127 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	//template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupDepthImage() & -> status_t
-	//{
-	//	assert(m_progressStatus & DEVICE_CREATED);
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupDepthImage() & -> status_t
+	{
+		assert(m_progressStatus & DEVICE_CREATED);
 
-	//	uint32_t graphicsIdxsUnsigned[MXC_RENDERER_GRAPHICS_QUEUES_COUNT] = {static_cast<uint32_t>(m_queueIdx.graphics)}; // TODO change, not futureproof
+		uint32_t graphicsIdxsUnsigned[MXC_RENDERER_GRAPHICS_QUEUES_COUNT] = {static_cast<uint32_t>(m_queueIdx.graphics)}; // TODO change, not futureproof
 
-	//	// create depth image
-	//	VkImageCreateInfo const depthImgCreateInfo {
-	//		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-	//		.pNext = nullptr,
-	//		.flags = 0,// specifies additional properties of the image. BE AWARE THAT MANY THINGS, such as 2darray, cubemap, sparce memory, multisampling, ... require a flag
-	//		.imageType = VK_IMAGE_TYPE_2D,// number of dimensions
-	//		.format = m_depthImageFormat,
-	//		.extent = VkExtent3D{
-	//				.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH,
-	//				.height = m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
-	//				.depth = 0
-	//		},
-	//		.mipLevels = 1, // numbers of levels of detail 
-	//		.arrayLayers = 1, // numbers of layers in the image (Photoshop sense)
-	//		.samples = VK_SAMPLE_COUNT_1_BIT,//VkSampleCountFlagBits
-	//		.tiling = VK_IMAGE_TILING_OPTIMAL, // how image is laid out in memory, between optimal, linear, drm(requires extension, linux only)
-	//		.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-	//		.sharingMode = VK_SHARING_MODE_EXCLUSIVE, // either exclusive or concurrent
-	//		.queueFamilyIndexCount = MXC_RENDERER_GRAPHICS_QUEUES_COUNT,
-	//		.pQueueFamilyIndices = graphicsIdxsUnsigned, // assuming device and queues have been setup
-	//		.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-	//	};
+		// create depth image
+		VkImageCreateInfo const depthImgCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,// specifies additional properties of the image. BE AWARE THAT MANY THINGS, such as 2darray, cubemap, sparce memory, multisampling, ... require a flag
+			.imageType = VK_IMAGE_TYPE_2D,// number of dimensions
+			.format = m_depthImageFormat,
+			.extent = VkExtent3D{
+					.width = m_surfaceCapabilities.currentExtent.width != 0xffffffff ? m_surfaceCapabilities.currentExtent.width : WINDOW_WIDTH,
+					.height = m_surfaceCapabilities.currentExtent.height != 0xffffffff ? m_surfaceCapabilities.currentExtent.height : WINDOW_HEIGHT,
+					.depth = 0
+			},
+			.mipLevels = 1, // numbers of levels of detail 
+			.arrayLayers = 1, // numbers of layers in the image (Photoshop sense)
+			.samples = VK_SAMPLE_COUNT_1_BIT,//VkSampleCountFlagBits
+			.tiling = VK_IMAGE_TILING_OPTIMAL, // how image is laid out in memory, between optimal, linear, drm(requires extension, linux only)
+			.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE, // either exclusive or concurrent
+			.queueFamilyIndexCount = MXC_RENDERER_GRAPHICS_QUEUES_COUNT,
+			.pQueueFamilyIndices = graphicsIdxsUnsigned, // assuming device and queues have been setup
+			.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+		};
 
-	//	VkResult res = vkCreateImage(m_device, &depthImgCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImage);
-	//	if (res != VK_SUCCESS)
-	//	{
-	//		fprintf(stderr, "failed to create depth image!\n");
-	//		return APP_GENERIC_ERR;
-	//	}
+		VkResult res = vkCreateImage(m_device, &depthImgCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImage);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to create depth image!\n");
+			return APP_GENERIC_ERR;
+		}
 
-	//	// create depth image view
-	//	// they are non dispatchable handles NOT accessed by shaders but represent a range in an image with associated metadata
-	//	// special values useful for creation = VK_REMAINING_ARRAY_LAYERS, VK_REMAINING_MIP_LEVELS
-	//	VkImageViewCreateInfo const depthImgViewCreateInfo {
-	//		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-	//		.pNext = nullptr,
-	//		.flags = 0,// there is one to specify that view will be read during fragment density stage? and one for reading the view in CPU at the end of the command buffer execution
-	//		.image = m_depthImage,
-	//		.viewType = VK_IMAGE_VIEW_TYPE_2D,// dimentionality and type of view, must be "less then or equal" to image
-	//		.format = m_depthImageFormat,
-	//		.components = VkComponentMapping{// VkComponentMapping, all swizzle identities
-	//			.r = VK_COMPONENT_SWIZZLE_IDENTITY,
-	//			.g = VK_COMPONENT_SWIZZLE_IDENTITY,
-	//			.b = VK_COMPONENT_SWIZZLE_IDENTITY,
-	//			.a = VK_COMPONENT_SWIZZLE_IDENTITY
-	//		},
-	//		.subresourceRange = VkImageSubresourceRange{// specifies subrange accessible from view
-	//			.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-	//			.baseMipLevel = 0,
-	//			.levelCount = VK_REMAINING_MIP_LEVELS,
-	//			.baseArrayLayer = 0,
-	//			.layerCount = VK_REMAINING_ARRAY_LAYERS
-	//		}
-	//	};
+		// create depth image view
+		// they are non dispatchable handles NOT accessed by shaders but represent a range in an image with associated metadata
+		// special values useful for creation = VK_REMAINING_ARRAY_LAYERS, VK_REMAINING_MIP_LEVELS
+		VkImageViewCreateInfo const depthImgViewCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,// there is one to specify that view will be read during fragment density stage? and one for reading the view in CPU at the end of the command buffer execution
+			.image = m_depthImage,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,// dimentionality and type of view, must be "less then or equal" to image
+			.format = m_depthImageFormat,
+			.components = VkComponentMapping{// VkComponentMapping, all swizzle identities
+				.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+				.g = VK_COMPONENT_SWIZZLE_IDENTITY,
+				.b = VK_COMPONENT_SWIZZLE_IDENTITY,
+				.a = VK_COMPONENT_SWIZZLE_IDENTITY
+			},
+			.subresourceRange = VkImageSubresourceRange{// specifies subrange accessible from view
+				.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+				.baseMipLevel = 0,
+				.levelCount = VK_REMAINING_MIP_LEVELS,
+				.baseArrayLayer = 0,
+				.layerCount = VK_REMAINING_ARRAY_LAYERS
+			}
+		};
 
-	//	res = vkCreateImageView(m_device, &depthImgViewCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageView);
-	//	if (res != VK_SUCCESS)
-	//	{
-	//		vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
-	//		fprintf(stderr, "failed to create depth image view!\n");
-	//		return APP_GENERIC_ERR;
-	//	}
+		res = vkCreateImageView(m_device, &depthImgViewCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageView);
+		if (res != VK_SUCCESS)
+		{
+			vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
+			fprintf(stderr, "failed to create depth image view!\n");
+			return APP_GENERIC_ERR;
+		}
 
-	//	m_progressStatus |= DEPTH_IMAGE_CREATED;
-	//	return APP_SUCCESS;
-	//}
+		m_progressStatus |= DEPTH_IMAGE_CREATED;
+		return APP_SUCCESS;
+	}
 
-	//template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupDepthDeviceMemory() & -> status_t
-	//{
-	//	assert((m_progressStatus & (DEVICE_CREATED | DEPTH_IMAGE_CREATED)) && "VkDevice required to allocate VkDeviceMemory!\n");
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupDepthDeviceMemory() & -> status_t
+	{
+		assert((m_progressStatus & (DEVICE_CREATED | DEPTH_IMAGE_CREATED)) && "VkDevice required to allocate VkDeviceMemory!\n");
 
-	//	// get image memory requirements for depth image
-	//	VkMemoryRequirements depthImageMemoryRequirements; // size, alignment, memory type bits
-	//	vkGetImageMemoryRequirements(m_device, m_depthImage, &depthImageMemoryRequirements);
+		// get image memory requirements for depth image
+		VkMemoryRequirements depthImageMemoryRequirements; // size, alignment, memory type bits
+		vkGetImageMemoryRequirements(m_device, m_depthImage, &depthImageMemoryRequirements);
 
-	//	// allocate memory
-	//	VkPhysicalDeviceMemoryProperties depthImageMemoryProperties; // typecount, types, heapcount, heaps
-	//	vkGetPhysicalDeviceMemoryProperties(m_phyDevice, &depthImageMemoryProperties);
+		// allocate memory
+		VkPhysicalDeviceMemoryProperties depthImageMemoryProperties; // typecount, types, heapcount, heaps
+		vkGetPhysicalDeviceMemoryProperties(m_phyDevice, &depthImageMemoryProperties);
 
-	//	// -- for each memory type present in the device, find one that matches our memory requirement
-	//	uint32_t i = 0u;
-	//	for (; i < depthImageMemoryProperties.memoryTypeCount; ++i)
-	//	{
-	//		// VkMemoryRequirements::memoryTypeBits is a bitfield (uint32) whose bits are set to one if the corresponding memory type index(==power of 2) can be used by the resource
-	//		// so we will: 1) check if current memory type index can be used by resource
-	//		// 			   2) check if the memory type's properties are suitable to OUR needs
-	//		if ( depthImageMemoryRequirements.memoryTypeBits & (1 << i) // check if i-th bit is a type usable by resource
-	//		 	 && depthImageMemoryProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) // check if type's properties match our needs
-	//		{
-	//			break;
-	//		}
-	//	}
-	//	if (i == depthImageMemoryProperties.memoryTypeCount)
-	//	{
-	//		fprintf(stderr, "could not find any suitable memory types to allocate memory for depth image!\n");
-	//		return APP_GENERIC_ERR;
-	//	}
+		// -- for each memory type present in the device, find one that matches our memory requirement
+		uint32_t i = 0u;
+		for (; i < depthImageMemoryProperties.memoryTypeCount; ++i)
+		{
+			// VkMemoryRequirements::memoryTypeBits is a bitfield (uint32) whose bits are set to one if the corresponding memory type index(==power of 2) can be used by the resource
+			// so we will: 1) check if current memory type index can be used by resource
+			// 			   2) check if the memory type's properties are suitable to OUR needs
+			if ( depthImageMemoryRequirements.memoryTypeBits & (1 << i) // check if i-th bit is a type usable by resource
+			 	 && depthImageMemoryProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) // check if type's properties match our needs
+			{
+				break;
+			}
+		}
+		if (i == depthImageMemoryProperties.memoryTypeCount)
+		{
+			fprintf(stderr, "could not find any suitable memory types to allocate memory for depth image!\n");
+			return APP_GENERIC_ERR;
+		}
 
-	//	VkMemoryAllocateInfo const allocateInfo {
-	//		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-	//		.pNext = nullptr, // There are many extentions, most of them even platform-specific
-	//		.allocationSize = depthImageMemoryRequirements.size,
-	//		.memoryTypeIndex = i // type of memory required, must be supported by device
-	//	};
-	//	VkResult const res = vkAllocateMemory(m_device, &allocateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageMemory);
+		VkMemoryAllocateInfo const allocateInfo {
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.pNext = nullptr, // There are many extentions, most of them even platform-specific
+			.allocationSize = depthImageMemoryRequirements.size,
+			.memoryTypeIndex = i // type of memory required, must be supported by device
+		};
+		VkResult const res = vkAllocateMemory(m_device, &allocateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageMemory);
 
-	//	// bind allocated memory to depth image
-	//	vkBindImageMemory(m_device, m_depthImage, m_depthImageMemory, 0); // last parameter is offset TODO this means that in one memory heap we can allocate more than one image!
+		// bind allocated memory to depth image
+		vkBindImageMemory(m_device, m_depthImage, m_depthImageMemory, 0); // last parameter is offset TODO this means that in one memory heap we can allocate more than one image!
 
-	//	m_progressStatus |= DEPTH_MEMORY_ALLOCATED;
-	//	printf("allocated device memory for depth buffer!\n");
-	//	return APP_SUCCESS;
-	//}
+		m_progressStatus |= DEPTH_MEMORY_ALLOCATED;
+		printf("allocated device memory for depth buffer!\n");
+		return APP_SUCCESS;
+	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupRenderPass() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupRenderPass() & -> status_t
 	{
 		// -- create output attachment and references ------------------------------------------------------------------------------------
 		// render pass output attachment descriptions array (for the render pass, we will also need attachment references for the subpasses, which are handles decorated with some data to this array)
@@ -1207,20 +1204,20 @@ namespace mxc
 				.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR// layout of the attachment image subresource will be TRANSITIONED TO when the render pass instance ends(the last subpass)
 			},
 			// depth attachment
-			//{
-			//	.flags = 0,
-			//    // VK_FORMAT_D32_SFLOAT: 32-bit float for depth
-			//    // VK_FORMAT_D32_SFLOAT_S8_UINT: 32-bit signed float for depth and 8 bit stencil component
-			//    // VK_FORMAT_D24_UNORM_S8_UINT: 24-bit float for depth and 8 bit stencil component
-			//	.format = m_depthImageFormat, // no need to check for support of such a format, as the 3 of them are MANDATORY BY THE VULKAN SPECIFICATION. see setupPhysical device and TODO refactor
-			//	.samples = VK_SAMPLE_COUNT_1_BIT,
-			//	.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //(VkAttachmentLoadOp)
-			//	.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-			//	.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-			//	.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-			//	.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			//	.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-			//}
+			{
+				.flags = 0,
+			    // VK_FORMAT_D32_SFLOAT: 32-bit float for depth
+			    // VK_FORMAT_D32_SFLOAT_S8_UINT: 32-bit signed float for depth and 8 bit stencil component
+			    // VK_FORMAT_D24_UNORM_S8_UINT: 24-bit float for depth and 8 bit stencil component
+				.format = m_depthImageFormat, // no need to check for support of such a format, as the 3 of them are MANDATORY BY THE VULKAN SPECIFICATION. see setupPhysical device and TODO refactor
+				.samples = VK_SAMPLE_COUNT_1_BIT,
+				.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //(VkAttachmentLoadOp)
+				.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+				.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+				.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+				.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+			}
 		};
 
 		// output attachment references
@@ -1231,10 +1228,10 @@ namespace mxc
 				.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL// VkImageLayout, specifies the layout of the attachment used during the subpass
 			},
 			// depth attachment ref
-			//{
-			//	.attachment = 1,
-			//	.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-			//}
+			{
+				.attachment = 1,
+				.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+			}
 		}; 
 
 		// subpasses creation
@@ -1310,7 +1307,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupFramebuffers() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupFramebuffers() & -> status_t
 	{
 		assert(m_progressStatus & RENDERPASS_CREATED);
 
@@ -1326,7 +1323,7 @@ namespace mxc
 		// is that you have to prevent the next frame’s rendering commands from starting until the current frame’s commands have finished with the 
 		// depth buffer. And since you usually have plenty of other reasons for imposing synchronization between frames, 
 		// that synchronization should be sufficient.
-		VkImageView usedAttachments[MXC_RENDERER_ATTACHMENT_COUNT] { m_swapchainImageViews[0]/*, m_depthImageView*/}; // we have 2 attachments per swapchain image, 1st is color, 2nd depth. Depth doesn't change
+		VkImageView usedAttachments[MXC_RENDERER_ATTACHMENT_COUNT] { m_swapchainImageViews[0], m_depthImageView}; // we have 2 attachments per swapchain image, 1st is color, 2nd depth. Depth doesn't change
 
 		VkFramebufferCreateInfo framebufferCreateInfo {
 			.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
@@ -1363,7 +1360,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
 	{
 		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
 
@@ -1479,20 +1476,6 @@ namespace mxc
 			}
 		};
 
-		VkViewport const viewport {
-			.x = 0.f,// x,y define the upper-left corner of the viewport in screen coordinates. x,y must be >= viewportBoundsRange[0], x+width,y+height <= viewportBoundsRange[1]. they are VkPhysicalDeviceLimits
-			.y = 0.f,
-			.width = static_cast<float>(m_surfaceExtent.width), // width, height are the viewport's width and height. MUST BE LESS THAN the maximum specified in the device limits(in the device properties) // TODO setup checks TODO TODO important
-			.height = static_cast<float>(m_surfaceExtent.height),
-			.minDepth = 0.f, // viewport's width and height. min can be bigger than max (what even is the result then?), for values out of the range [0.f,1.f], you need extension depth_range_unrestricted
-			.maxDepth = 1.f
-		};
-
-		VkRect2D const scissor {
-			.offset = {0, 0}, // VkOffset type, has 2 SIGNED integers
-			.extent = m_surfaceExtent // VkExtent type, has 2 UNSIGNED integers
-		};
-
 		VkPipelineColorBlendAttachmentState const colorBlendAttachmentStates[] {
 			{
 				.blendEnable = VK_TRUE,
@@ -1506,11 +1489,16 @@ namespace mxc
 			}
 		};
 
+		VkDynamicState const dynamicStates[2] {
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_SCISSOR
+		}; // TODO refactor to make it configurable
+
 		VulkanPipelineConfig graphicsPipelineConfig;
 		graphicsPipelineConfig.rasterizationStateCI.frontFace = VK_FRONT_FACE_CLOCKWISE;
-		graphicsPipelineConfig.viewportStateCI.pViewports = &viewport;
-		graphicsPipelineConfig.viewportStateCI.pScissors = &scissor;
 		graphicsPipelineConfig.colorBlendStateCI.pAttachments = colorBlendAttachmentStates;
+		graphicsPipelineConfig.dynamicStateCI.dynamicStateCount = 2; // TODO make it configurable
+		graphicsPipelineConfig.dynamicStateCI.pDynamicStates = dynamicStates;
 
 		// TODO setup pipeline cache
 		// -- finally assemble the graphics pipeline ------------------------------------------------------------------------------------------------
@@ -1531,7 +1519,7 @@ namespace mxc
 			.layout = m_graphicsPipelineLayout,
 			.renderPass = m_renderPass,
 			.subpass = 0, // subpass index in the renderpass. A pipeline will execute 1 subpass only.
-			.basePipelineHandle = VK_NULL_HANDLE, // recycle old pipeline, requires PIPELINE_DERIVATIVES flag.
+			.basePipelineHandle = VK_NULL_HANDLE, // recycle old pipeline, requires PIPELINE_DERIVATIVES flag. TODO set this up
 			.basePipelineIndex = 0 // doesn't count if basePipelineHandle is VK_NULL_HANDLE
 		};
 
@@ -1555,318 +1543,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-//	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
-//	{
-//		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
-//
-//		// creation of all information about pipeline steps: layout, and then in order of execution
-//		// -- pipeline layout TODO update when adding descriptor sets --------------------------------------------------------------------------------------------------------------
-//		VkPipelineLayoutCreateInfo const graphicsPipelineLayoutCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0, // there is only 1 and requires an extension
-//			.setLayoutCount = 0, // TODO change, number of descriptor sets to include in the pipeline layout
-//			.pSetLayouts = nullptr, // TODO change, pointer to array of VkDescriptorSetLayout objects
-//			.pushConstantRangeCount = 0, // TODO change, number to push constant ranges (range = a part of push constant)
-//			.pPushConstantRanges = nullptr // TODO change
-//		};
-//
-//		VkResult res = vkCreatePipelineLayout(m_device, &graphicsPipelineLayoutCI, /*VkAllocationCallbacks**/nullptr, &m_graphicsPipelineLayout);
-//		if (res != VK_SUCCESS)
-//		{
-//			fprintf(stderr, "failed to create graphics pipeline layout!\n");
-//			return APP_GENERIC_ERR;
-//		}
-//		printf("created graphics pipeline layout\n");
-//		m_progressStatus |= GRAPHICS_PIPELINE_LAYOUT_CREATED;
-//
-//		// -- VkPipelineShaderStageCreateInfo describes the shaders to use in the graphics pipeline TODO number of stages hardcoded ----------------------------------------------------------------------------------------------
-//		// ---- creation of the shader modules
-//		// ------ evaluate file sizes
-//		namespace fs = std::filesystem;
-//		fs::path const relativeShaderPaths[MXC_RENDERER_SHADERS_COUNT] {"shaders/triangle.vert.spv","shaders/triangle.frag.spv"};// TODO hardcode of shaders numbers
-//		fs::path const shaderPaths[MXC_RENDERER_SHADERS_COUNT] = {fs::current_path() / relativeShaderPaths[0], fs::current_path() / relativeShaderPaths[1]}; 
-//		std::error_code ecs[MXC_RENDERER_SHADERS_COUNT];
-//		size_t const shaderSizes[MXC_RENDERER_SHADERS_COUNT] {fs::file_size(shaderPaths[0], ecs[0]), fs::file_size(shaderPaths[1], ecs[1])}; // TODO check the error code, whose codes themselves are platform specific
-//		
-//		// ------ allocate char buffers to store shader binary data
-//		VectorCustom<char> shadersBuf[2];
-//		shadersBuf[0].resize(shaderSizes[0]);
-//		shadersBuf[1].resize(shaderSizes[1]);
-//		printf("current path is %s\nshader path of vertex shader: %s\nshader path of fragment shader: %s\n", fs::current_path().c_str(), shaderPaths[0].c_str(), shaderPaths[1].c_str());
-//		std::ifstream shaderStreams[MXC_RENDERER_SHADERS_COUNT] {std::ifstream(shaderPaths[0]), std::ifstream(shaderPaths[1])};
-//		if (!shaderStreams[0].is_open() || !shaderStreams[0].is_open())
-//		{
-//			fprintf(stderr, "failed to open shader files whyyyyyyyyyyyyyyyyyyyyyyyy\n");
-//			return APP_GENERIC_ERR;
-//		}
-//		shaderStreams[0].read(shadersBuf[0].data(), shaderSizes[0]);
-//		shaderStreams[1].read(shadersBuf[1].data(), shaderSizes[1]);
-//
-//		printf("vector sizes are %u and %u\n", shadersBuf[0].size(), shadersBuf[1].size());
-//		assert(shadersBuf[0].size() != 0 && shadersBuf[1].size() != 0);
-//
-//		VkShaderModuleCreateInfo const shaderModuleCreateInfos[MXC_RENDERER_SHADERS_COUNT] {
-//			{ // Vertex Shader Module Create Info
-//				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-//				.pNext = nullptr,
-//				.flags = 0,
-//				.codeSize = shaderSizes[0],
-//				.pCode = reinterpret_cast<uint32_t*>(shadersBuf[0].data())
-//			},
-//			{ // Fragment Shader Module Create Info
-//				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-//				.pNext = nullptr,
-//				.flags = 0,
-//				.codeSize = shaderSizes[1],
-//				.pCode = reinterpret_cast<uint32_t*>(shadersBuf[1].data())
-//			}
-//		};
-//
-//		VkShaderModule shaders[MXC_RENDERER_SHADERS_COUNT] = {VK_NULL_HANDLE};
-//		if ( vkCreateShaderModule(m_device, &shaderModuleCreateInfos[0],/*VkAllocationCallbacks**/nullptr, &shaders[0]) != VK_SUCCESS 
-//			|| vkCreateShaderModule(m_device, &shaderModuleCreateInfos[1], /*VkAllocationCallbacks**/nullptr, &shaders[1]) != VK_SUCCESS)
-//		{
-//			vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
-//			return APP_GENERIC_ERR;
-//		}
-//
-//		// ---- creation of the information structure
-//		VkPipelineShaderStageCreateInfo const graphicsPipelineShaderStageCIs[MXC_RENDERER_SHADERS_COUNT] {
-//			VkPipelineShaderStageCreateInfo{ // VERTEX SHADER
-//				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-//				.pNext = nullptr, // TODO
-//				.flags = 0, // all of the flags regard SUBGROUPS, a group of tasks running in parallel in a compute unit (warp or wavefront). Too advanced TODO future
-//				.stage = VK_SHADER_STAGE_VERTEX_BIT,
-//				.module = shaders[0],
-//				.pName = "main",
-//				.pSpecializationInfo = nullptr// sepcialization constants are a mechanism to specify in a SPIR-V module constant values at pipeline creation time, which can be modified while executing the application TODO later
-//			},
-//			VkPipelineShaderStageCreateInfo{ // FRAGMENT SHADER
-//				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-//				.pNext = nullptr,
-//				.flags = 0,
-//				.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-//				.module = shaders[1],
-//				.pName = "main",
-//				.pSpecializationInfo = nullptr
-//			}
-//		};
-//
-//		// -- VkPipelineVertexInputStateCreateInfo -------------------------------------------------------------------------------------------------------------------------------------------------------------
-//		// describes the vertices to be passed, without actually passing the data (number, stride, buffer to data). Ignored if Mesh shader is used
-//		// ---- Creation of VkVertexAttributeDescriptions(in which bindings is the vertex data distributed?) 
-//		//		and of VkVertexInputAttributeDescription(in which layout is each vertex in each of the bindings formatted?)
-//		VkVertexInputBindingDescription const vertInputBindingDescriptions[] {
-//			{
-//				.binding = 0, // Binding number which this structure is describing. You need a description for each binding in use. TODO we have no binding now
-//				.stride = 0, // distance between successive elements in bytes (if attributes are stored interleaved, per vert, then stride = sizeof(Vertex))
-//				.inputRate = VK_VERTEX_INPUT_RATE_VERTEX // VkVertexInputRate specifies whether attributes stored in the buffer are PER VERTEX or PER INSTANCE
-//			}
-//		};
-//
-//		VkVertexInputAttributeDescription const vertInputAttributeDescriptions[] { // TODO for now I have no attributes but just setting up the skeleton for future use
-//			{
-//				.location = 0,
-//				.binding = 0,
-//				.format = VK_FORMAT_R32G32B32_SFLOAT, // VkFormat
-//				.offset = 0 // in bytes, from the start of the current element
-//			}
-//		};
-//
-//		VkPipelineVertexInputStateCreateInfo const graphicsPipelineVertexInputStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0,
-//			.vertexBindingDescriptionCount = 0, // TODO change this when you add some vertex attributes
-//			.pVertexBindingDescriptions = vertInputBindingDescriptions,
-//			.vertexAttributeDescriptionCount = 0,
-//			.pVertexAttributeDescriptions = vertInputAttributeDescriptions
-//		};
-//
-//		// -- VkPipelineInputAssemblyStateCreateInfo specifies behaviour of the input assembly stage, i.e. vertex attributes, topology,...
-//		// with topology triangle list we specify each triangle separately. This means duplicate data for adjacent triangles, but it is the easier to start with. others include point list/strip, line list/strip, triangle list/strip/fan, (these 3,except fan, with or without adjacency(which means that some verts specifies an ADJACENCY EDGE, an edge not displayed whose points are accessible only to geo shader. purpose=primitive processing)), or patch list(see bezier curves, vertices are control points)
-//		VkPipelineInputAssemblyStateCreateInfo const graphicsPipelineInputAssemblyStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0,
-//			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,// chooses a PRIMITIVE TOPOLOGY, ie how consequent vertices are arranged in primitives during input assembly and kept up to the rasterization stage(if not altered by tesselation and/or geometry shader). In case of mesh shader, it is the latter that defines the topology used.
-//			.primitiveRestartEnable = VK_FALSE // allows restart of topology (there are some topologies which can take as many verts and create a continuous mesh), and it will do that if, DURING INDEXED DRAWS(ONLY), the special value 0xfff...(number of f's depends on index type). Discards vertices of incomplete primitive (eg first of the 2 verts required to continue triangle strip)
-//		};
-//
-//		// -- VkPipelineTessellationStateCreateInfo specifies the tessellation state used by the tessellation shaders, TODO future
-//		VkPipelineTessellationStateCreateInfo const graphicsPipelineTessellationStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
-//			.pNext = nullptr, // NULL or to an instance of domain origin state create info
-//			.flags = 0,
-//			.patchControlPoints = 0 // number of control points per patch. TODO we are not going to use tessellation for now
-//		};
-//
-//		// TODO dynamic state
-//		// -- VkPipelineViewportStateCreateInfo defines the window viewport, i.e. an rectangle+a set of scissors. NUM. SCISSORS = NUM. VIEWPORTS < VkPhysicalDeviceLimits::maxViewports
-//		VkViewport const viewport {
-//			.x = 0.f,// x,y define the upper-left corner of the viewport in screen coordinates. x,y must be >= viewportBoundsRange[0], x+width,y+height <= viewportBoundsRange[1]. they are VkPhysicalDeviceLimits
-//			.y = 0.f,
-//			.width = static_cast<float>(m_surfaceExtent.width), // width, height are the viewport's width and height. MUST BE LESS THAN the maximum specified in the device limits(in the device properties) // TODO setup checks TODO TODO important
-//			.height = static_cast<float>(m_surfaceExtent.height),
-//			.minDepth = 0.f, // viewport's width and height. min can be bigger than max (what even is the result then?), for values out of the range [0.f,1.f], you need extension depth_range_unrestricted
-//			.maxDepth = 1.f
-//		};
-//
-//		VkRect2D const scissor {
-//			.offset = {0, 0}, // VkOffset type, has 2 SIGNED integers
-//			.extent = m_surfaceExtent // VkExtent type, has 2 UNSIGNED integers
-//		};
-//
-//		VkPipelineViewportStateCreateInfo const graphicsPipelineViewportStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-//			.pNext = nullptr, 
-//			.flags = 0,
-//			.viewportCount = 1, // greater than 1 requires multiviewport extension
-//			.pViewports = &viewport,
-//			.scissorCount = 1,
-//			.pScissors = &scissor
-//		};
-//
-//		// -- VkPipelineRasterizationStateCreateInfo specifies how the vertices will be rasterized, and stores the rasterization state
-//		VkPipelineRasterizationStateCreateInfo const graphicsPipelineRasterizationStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-//			.pNext = nullptr, // lots of extensions here
-//			.flags = 0,
-//			.depthClampEnable = VK_FALSE, // whether or not to enable depth clamp, i.e. anything with depth resulting from the depth test > farplane(1)
-//			.rasterizerDiscardEnable = VK_FALSE, // are primitives discarded just before rasterization (no image produced), used only if you want to achieve some computation on vertex data, e.g. physics or animation
-//			.polygonMode = VK_POLYGON_MODE_FILL, // TRIANGLE RENDERING MODE, this has nothing to do with the primitive topology, which defines how we want to GROUP vertex data to process and IDENTIFY SEPARATE OBJECTS. Here, we want to define if we want to color the points of each triangle, lines, or fill them completely
-//			.cullMode = VK_CULL_MODE_BACK_BIT,// which face/faces of triangle to hide and which to display, relates to TRIANGLE WINDING, we want to setup the CCW orientation as front face, and cull the back face
-//			.frontFace = VK_FRONT_FACE_CLOCKWISE, // TODO introduce transforms and swap this back to counter clockwise winding for front face
-//			.depthBiasEnable = VK_FALSE, // TODO later, when doing shadow maps
-//			.depthBiasConstantFactor = 0.f,
-//			.depthBiasClamp = 0.f,
-//			.depthBiasSlopeFactor = 0.f,
-//			.lineWidth = 1.f,
-//		};
-//
-//		// -- VkPipelineMultisampleStateCreateInfo structure defining multisampling state when multisampling is used
-//		VkPipelineMultisampleStateCreateInfo const graphicsPipelineMultisampleStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0,
-//			.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, // number of samples used in the rasterization
-//			.sampleShadingEnable = VK_FALSE, // see sample shading TODO later
-//			.minSampleShading = 0.f, // disabled if no sample shading
-//			.pSampleMask = nullptr, // disabled 
-//			.alphaToCoverageEnable = VK_FALSE,
-//			.alphaToOneEnable = VK_FALSE // see multisample coverage
-//		};
-//
-//		// TODO see stencil test
-//		// -- VkPipelineDepthStencilCreateInfo specifies depth/stencil state when access, rasterization and render of depth/stencil buffers are enabled
-//		VkStencilOpState constexpr stencilOpState {
-//				// The stencil test is controlled by one of two sets of stencil-related state, the front stencil state and the back stencil state. 
-//				// Stencil tests and writes use the back stencil state when processing fragments generated by back-facing polygons, and the front stencil state when processing fragments generated by front-facing polygons or any other primitives.
-//				.failOp = VK_STENCIL_OP_KEEP, // what to do if stencil test fails
-//				.passOp = VK_STENCIL_OP_KEEP, // what to do if stencil test is successful
-//				.depthFailOp = VK_STENCIL_OP_KEEP, // passes stencil but fails depth test
-//				.compareOp = VK_COMPARE_OP_ALWAYS, // specifies stencil test operation. same type as depth comparison, but with another meaning
-//				.compareMask = 0, // selects the bits of the unsigned integer values participating in the stencil test
-//				.writeMask = 0, // selects the bits of the unsigned integer values updated by the stencil test in the stencil framebuffer attachment
-//				.reference = 0 // integer stencil reference value used in some of the compare ops
-//			}
-//		VkPipelineDepthStencilStateCreateInfo const graphicsPipelineDepthStencilStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0, // extension order attachment access? TODO 
-//			.depthTestEnable = VK_FALSE,// VK_TRUE,
-//			.depthWriteEnable = VK_FALSE, //VK_TRUE,
-//			.depthCompareOp = VK_COMPARE_OP_LESS,
-//			.depthBoundsTestEnable = VK_FALSE, // enables DEPTH BOUND TEST, requires depth test. You specify a range with min and max, and any depth value outside that range will fail the test 
-//			.stencilTestEnable = VK_FALSE, // TODO enable stencil test
-//			.front = stencilOpState,
-//			.back = stencilOpState,
-//			.minDepthBounds = 0.f,
-//			.maxDepthBounds = 0.f
-//		};
-//
-//		// -- VkPipelineColorBlendStateCreateInfo specifies how color outputs of the fragment stage will be blended and manages the blend state. All of this requires of course a color attachment
-//		// Blending is only defined for floating-point, UNORM, SNORM, and sRGB formats. Within those formats, the implementation may only support blending on some subset of them. Which formats support blending is indicated by
-//		// VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT
-//		// formula = srcAlpha * srcCol + (1 - srcAlpha) * dstCol, where src = new fragment, dst = old fragment 
-//		VkPipelineColorBlendAttachmentState const colorBlendAttachmentStates[] {
-//			{
-//				.blendEnable = VK_TRUE,
-//				.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-//				.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-//				.colorBlendOp = VK_BLEND_OP_ADD,
-//				.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-//				.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-//				.alphaBlendOp = VK_BLEND_OP_ADD,
-//				.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT // specifies which components of the color has to be written alfter blending
-//			}
-//		};
-//
-//		VkPipelineColorBlendStateCreateInfo const graphicsPipelineColorBlendStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-//			.pNext = nullptr,
-//			.flags = 0, // extension rasterization order attachment access
-//			.logicOpEnable = VK_FALSE, // enables a logic operation instead of a mathematical operation to perform blending. No. we want linear interpolation alpha_dest * c_dest + (1-alpha_dest) * c_src, also requires logicOp feature
-//			.logicOp = VkLogicOp{},
-//			.attachmentCount = 1u, // WARNING POSSIBLE ERROR we will perform blending only on color
-//			.pAttachments = colorBlendAttachmentStates,
-//			.blendConstants = {} // array of constant values specifying factors for 3 color components + alpha 
-//		};
-//
-//		// -- VkPipelineDynamicStateCreateInfo defines which properties of the pipeline state objects are dynamic and can be changed after the pipeline's creation. TODO set it up for resizeable screen. Can be null
-//		VkPipelineDynamicStateCreateInfo const graphicsPipelineDynamicStateCI {
-//			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-//			.pNext = nullptr,// no exts here for now Constructs the container with count
-//			.flags = 0, // no flags here for now
-//			.dynamicStateCount = 0, // TODO setup framebuffer/surface/viewport/scissor size to be dynamic so that the window is resizeable
-//			.pDynamicStates = nullptr
-//		};
-//
-//		// TODO setup pipeline cache
-//		// -- finally assemble the graphics pipeline ------------------------------------------------------------------------------------------------
-//		VkGraphicsPipelineCreateInfo const graphicsPipelineCreateInfo {
-//			.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-//			.pNext = nullptr, // TODO you have no idea how many extension structures and flags there are
-//			.flags = 0,
-//			.stageCount = 2, // TODO change that
-//			.pStages = graphicsPipelineShaderStageCIs,
-//			.pVertexInputState = &graphicsPipelineVertexInputStateCI,
-//			.pInputAssemblyState = &graphicsPipelineInputAssemblyStateCI,
-//			.pTessellationState = &graphicsPipelineTessellationStateCI,
-//			.pViewportState = &graphicsPipelineViewportStateCI,
-//			.pRasterizationState = &graphicsPipelineRasterizationStateCI,
-//			.pMultisampleState = &graphicsPipelineMultisampleStateCI,
-//			.pDepthStencilState = &graphicsPipelineDepthStencilStateCI,
-//			.pColorBlendState = &graphicsPipelineColorBlendStateCI,
-//			.layout = m_graphicsPipelineLayout,
-//			.renderPass = m_renderPass,
-//			.subpass = 0, // subpass index in the renderpass. A pipeline will execute 1 subpass only.
-//			.basePipelineHandle = VK_NULL_HANDLE, // recycle old pipeline, requires PIPELINE_DERIVATIVES flag.
-//			.basePipelineIndex = 0 // doesn't count if basePipelineHandle is VK_NULL_HANDLE
-//		};
-//
-//		res = vkCreateGraphicsPipelines(
-//			m_device,
-//			VK_NULL_HANDLE, // VkPipelineCache
-//			1, // createInfoCount
-//			&graphicsPipelineCreateInfo,
-//			nullptr, // VkAllocationCallbacks*
-//			&m_graphicsPipeline
-//		); // TODO enable pipeline caching, TODO do not hardcode pipeline number
-//
-//		// -- cleanup ----------------------------------------------------------------------------------------------
-//		shaderStreams[0].close();
-//		shaderStreams[1].close();
-//		for (uint32_t i = 0u; i < MXC_RENDERER_SHADERS_COUNT; ++i)
-//			vkDestroyShaderModule(m_device, shaders[i], /*VkAllocationCallbacks**/nullptr);
-//		
-//		m_progressStatus |= GRAPHICS_PIPELINE_CREATED;
-//		printf("pipeline created!\n");
-//		return APP_SUCCESS;
-//	}
-
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::setupSynchronizationObjects() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupSynchronizationObjects() & -> status_t
 	{
 		assert((m_progressStatus & DEVICE_CREATED) && "device is required to create synchronization primitives!\n");
 		
@@ -1932,7 +1609,7 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::recordCommands(uint32_t framebufferIdx) & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::recordCommands(uint32_t framebufferIdx) & -> status_t
 	{
 		assert(framebufferIdx < m_swapchainImages.size() && "framebuffer index out of bounds");
 		assert((m_progressStatus & (GRAPHICS_PIPELINE_CREATED | COMMAND_BUFFER_ALLOCATED)) && "command buffer recording requires a pipeline and a command buffer!\n");
@@ -1969,6 +1646,21 @@ namespace mxc
 				vkCmdBindPipeline(m_graphicsCmdBufs[framebufferIdx], /*VkPipelineBindPoint*/VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline); // bind point = type of pipeline to bind
 
 				// TODO we didn't specify viewport and scissor to be dynamic for now, so no need to vkCmdSet them, but I'll come back
+				VkViewport const viewport {
+					.x = 0.f,// x,y define the upper-left corner of the viewport in screen coordinates. x,y must be >= viewportBoundsRange[0], x+width,y+height <= viewportBoundsRange[1]. they are VkPhysicalDeviceLimits
+					.y = 0.f,
+					.width = static_cast<float>(m_surfaceExtent.width), // width, height are the viewport's width and height. MUST BE LESS THAN the maximum specified in the device limits(in the device properties) // TODO setup checks TODO TODO important
+					.height = static_cast<float>(m_surfaceExtent.height),
+					.minDepth = 0.f, // viewport's width and height. min can be bigger than max (what even is the result then?), for values out of the range [0.f,1.f], you need extension depth_range_unrestricted
+					.maxDepth = 1.f
+				};
+
+				VkRect2D const scissor {
+					.offset = {0, 0}, // VkOffset type, has 2 SIGNED integers
+					.extent = m_surfaceExtent // VkExtent type, has 2 UNSIGNED integers
+				};
+				vkCmdSetViewport(m_graphicsCmdBufs[framebufferIdx], 0/*1st viewport*/, 1/*viewport count*/, &viewport);
+				vkCmdSetScissor(m_graphicsCmdBufs[framebufferIdx], 0/*1st scissor*/, 1/*scissor count*/, &scissor);
 
 				// draw command
 				vkCmdDraw(m_graphicsCmdBufs[framebufferIdx], /*vertexCount*/3, /*instance count*/1, /*firstVertexID*/0, /*firstInstanceID*/0); // vertex count == how many times to call the vertex shader != how many vertices we have stored in a buffer, instance count == number of times to draw the same primitives
@@ -1984,8 +1676,11 @@ namespace mxc
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto renderer<AllocTemplate>::draw() & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::draw() & -> status_t
 	{
+		VkResult res;
+
+
 		uint32_t static currentFramebuffer = 0u;
 
 		// wait for the previous frame to finish, as otherwise we would continue to submit command buffers indefinitely without knowing if the GPU has finished the previous one or not
@@ -1996,7 +1691,13 @@ namespace mxc
 
 		// then acquire next available image from the swapchain. To be safe that it is not being presented, we will wait on semaphoreImageAvailable
 		uint32_t imageIdx;
-		vkAcquireNextImageKHR(m_device, m_swapchain, /*timeout in ns*/0xffffffffffffffff, m_semaphoreImageAvailable[currentFramebuffer], /*fenceToSignal*/VK_NULL_HANDLE, &imageIdx);
+		res = vkAcquireNextImageKHR(m_device, m_swapchain, /*timeout in ns*/0xffffffffffffffff, m_semaphoreImageAvailable[currentFramebuffer], /*fenceToSignal*/VK_NULL_HANDLE, &imageIdx);
+		// if the window is resized while the device is not idle, we need to catch here that the surface is not anymore compatible with our swapchain, and recreate it, together with framebuffers, images and pipeline
+		if (res == VK_ERROR_OUT_OF_DATE_KHR)
+		{
+			fprintf(stderr, "Houston, we have a problem\n");
+			return APP_REQUIRES_RESIZE_ERR;
+		}
 		
 		// now reset, record and submit the command buffer
 		if (vkResetCommandBuffer(m_graphicsCmdBufs[currentFramebuffer], /*reset flags*/0) != VK_SUCCESS) // only reset flag for now is "release all resources"
@@ -2023,7 +1724,7 @@ namespace mxc
 			.pSignalSemaphores = &m_semaphoreRenderFinished[currentFramebuffer] // when rendering is done signal this semaphore, that will be waited on to present the image to the screen
 		};
 
-		VkResult res = vkQueueSubmit(m_queues[0], /*submitCount*/1, &submitInfo, /*fenceToSignal*/m_fenceInFlightFrame[currentFramebuffer]);
+		res = vkQueueSubmit(m_queues[0], /*submitCount*/1, &submitInfo, /*fenceToSignal*/m_fenceInFlightFrame[currentFramebuffer]);
 		if (res != VK_SUCCESS)
 		{
 			fprintf(stderr, "failed submitting draw operation!\n");
@@ -2049,6 +1750,11 @@ namespace mxc
 		};
 		
 		res = vkQueuePresentKHR(m_queues[0], &presentInfo);
+		if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) // TODO lacks if window was resized
+		{
+			fprintf(stderr, "Houston, we have a problem\n");
+			return APP_REQUIRES_RESIZE_ERR;
+		}
 		if (res != VK_SUCCESS)
 		{
 			fprintf(stderr, "failed to present image!\n");
@@ -2061,15 +1767,51 @@ namespace mxc
 	}
 
 	template <template<class> class AllocTemplate>
-	auto renderer<AllocTemplate>::progress_incomplete() const & -> status_t 
+	auto Renderer<AllocTemplate>::resize(uint32_t width, uint32_t height) & -> status_t
+	{
+		vkDeviceWaitIdle(m_device);
+
+		vkDestroyPipeline(m_device, m_graphicsPipeline, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, /*VkAllocationCallbacks**/nullptr);
+
+		// TODO vkDestroyFramebuffer times 3, then free memory 
+		for (uint32_t i = 0; i < m_swapchainImages.size(); ++i)
+		{
+			vkDestroyFramebuffer(m_device, m_framebuffers[i], /*VkAllocationCallbacks**/nullptr);
+		}
+		
+		// destroy depth buffer
+		printf("remember to clean up device memory!\n");
+		vkFreeMemory(m_device, m_depthImageMemory, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyImageView(m_device, m_depthImageView, /*VkAllocationCallbacks**/nullptr);
+		vkDestroyImage(m_device, m_depthImage, /*VkAllocationCallbacks**/nullptr);
+		
+		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, static_cast<uint32_t>(m_swapchainImages.size()), m_graphicsCmdBufs.data());
+
+		for (uint32_t i = 0u; i < m_swapchainImages.size(); ++i)
+		{
+			vkDestroyImageView(m_device, m_swapchainImageViews[i], /*VkAllocationCallback**/nullptr);
+		}
+
+		setupSwapchain(width, height);
+		setupDepthImage();
+		setupDepthDeviceMemory();
+		setupFramebuffers();
+		setupGraphicsPipeline();
+
+		return APP_SUCCESS;
+	}
+
+	template <template<class> class AllocTemplate>
+	auto Renderer<AllocTemplate>::progress_incomplete() const & -> status_t 
 	{
 		status_t const status = m_progressStatus ^ (
 			SYNCHRONIZATION_OBJECTS_CREATED |
 			GRAPHICS_PIPELINE_CREATED | 
 			GRAPHICS_PIPELINE_LAYOUT_CREATED |
 			FRAMEBUFFERS_CREATED |
-			//DEPTH_MEMORY_ALLOCATED |
-			//DEPTH_IMAGE_CREATED |
+			DEPTH_MEMORY_ALLOCATED |
+			DEPTH_IMAGE_CREATED |
 			RENDERPASS_CREATED |
 			COMMAND_BUFFER_ALLOCATED |
 			SWAPCHAIN_IMAGE_VIEWS_CREATED |
@@ -2106,10 +1848,12 @@ namespace mxc
 	private: // data
 		// main components
 		GLFWwindow* m_window;
-		renderer<Mallocator> m_renderer;
+		Renderer<Mallocator> m_renderer;
 
 	private: // utilities functions
-	
+		auto static framebufferResizeCallbackGLFW(GLFWwindow* window, int32_t width, int32_t height) -> void;
+		auto static errorCallbackGLFW(int errCode, char const * errMsg) -> void;
+
 	private: // utilities data members
 		uint32_t m_progressStatus; // BIT FIELD {glfw lib initialized?, glfw window created?}
 		/**NOTE
@@ -2125,7 +1869,18 @@ namespace mxc
 		};
 	};
 
-	auto errorCallbackGLFW(int errCode, char const * errMsg) -> void
+	auto app::framebufferResizeCallbackGLFW(GLFWwindow* window, int32_t width, int32_t height) -> void
+	{
+		// while the window is minimized, wait
+		while (width == 0 | height == 0)
+		{
+			glfwWaitEvents();
+		}
+		auto renderer = reinterpret_cast<Renderer<Mallocator>*>(glfwGetWindowUserPointer(window));
+		renderer->resize(width, height);
+	}
+
+	auto app::errorCallbackGLFW(int errCode, char const * errMsg) -> void
 	{
 		switch (errCode)
 		{
@@ -2185,7 +1940,7 @@ namespace mxc
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
 		// TODO = for now we disable resizing
-		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 		
 		// assuming we don't need more than 1 monitor and to specify properties of the display itself
 		// we can skip creation of GLFWvidmode and GLFWmonitor
@@ -2230,11 +1985,16 @@ namespace mxc
 		std::vector<char const*, Mallocator<char const*>> desiredDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
 		if (m_renderer.init(std::span(desiredInstanceExtensions.begin(), desiredInstanceExtensions.end()), 
-							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window) == APP_GENERIC_ERR)
+							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window, 
+							WINDOW_WIDTH, WINDOW_HEIGHT) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}
 
+		// setup code for resizing window
+		glfwSetWindowUserPointer(m_window, reinterpret_cast<void*>(&m_renderer));
+		glfwSetFramebufferSizeCallback(m_window, reinterpret_cast<GLFWframebuffersizefun>(framebufferResizeCallbackGLFW));
+		
 		// TODO add app initialized status when finish everything
 		return APP_SUCCESS;
 	}	
@@ -2262,7 +2022,15 @@ namespace mxc
 		while (!glfwWindowShouldClose(m_window))
 		{
 			/*** rendering stuff ***/
-			if (APP_SUCCESS != m_renderer.draw())
+			status_t res = m_renderer.draw();
+			if (res == APP_REQUIRES_RESIZE_ERR)
+			{
+				int32_t width, height;
+				glfwGetFramebufferSize(m_window, &width, &height);
+				printf("new width: %d, new height: %d\n", width, height);
+				m_renderer.resize(width, height);
+			}
+			else if (res != APP_SUCCESS)
 			{
 				return APP_GENERIC_ERR;
 			}
