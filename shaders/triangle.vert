@@ -10,11 +10,16 @@ struct VertexOut
 	float4 posH  : SV_Position;
 	float4 color : COLOR;
 };
+struct VertexIn
+{
+	float3 pos : Position;
+	float3 col : Color;
+};
 
 // while in GLSL you can access wherever you want in vertex shader gl_VertexIndex, here you need to declare a nonout parameter to the entry point which is going to be of type uint and semantics SV_VertexID
 
 // equivalent to "VertexOut main() {..., return vsOut;}" where vsOut is created in the stack of the function
-void main(uint vID : SV_VertexID, out VertexOut vsOut)
+void main(VertexIn input, uint vID : SV_VertexID, out VertexOut vsOut)
 {
 	// some system values are not semantics but pre generated values, such as SV_InstanceID(per instance index), SV_IsFrontFace, SV_PrimitiveID,...
 	// we will use the system value SV_VertexID to identify which vertex we are drawing.
@@ -24,6 +29,7 @@ void main(uint vID : SV_VertexID, out VertexOut vsOut)
 		float3(-0.4f, 0.2f,0.f)
 	};
 	
-	vsOut.posH = float4(positions[vID], 1.f);
-	vsOut.color = float4(0.7f, 0.3f, 0.1f, 1.f);
+	//vsOut.posH = float4(positions[vID], 1.f);
+	vsOut.posH = float4(input.pos, 1.f);
+	vsOut.color = float4(input.col, 1.f);
 }

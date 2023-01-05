@@ -1,5 +1,6 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <Eigen/Dense>
 
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <span> // unused yet
 #include <unordered_set>
 #include <algorithm> // copy, unstable_sort, transform, unique
+#include <type_traits> // is_standard_layout
 
 // here just for the copied allocator
 #include <new>
@@ -95,10 +97,17 @@ namespace mxc
 	#define APP_REQUIRES_RESIZE_ERR 9
 	//... more errors
 	
+	struct Vertex
+	{
+		Eigen::Vector3f pos;
+		Eigen::Vector3f col;
+	};
+	static_assert(std::is_standard_layout_v<Vertex>);
 	// TODO change return conventions into more meaningful and specific error carrying type to convey a more 
 	// 		specific status report
 	/*** WARNING: most of the functions will return APP_TRUE if successful, and APP_FALSE if unsuccessful ***/
-	struct VulkanPipelineConfig {
+	struct VulkanPipelineConfig 
+	{
 		VkPipelineVertexInputStateCreateInfo vertexInputStateCI {
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 			.pNext = nullptr,
@@ -224,7 +233,8 @@ namespace mxc
 		// TODO refactor so that you take a raw array. it is too restrictive to constraint api caller to use a specific class data structure
 		auto init(std::span<char const*> desiredInstanceExtensions, 
 				  std::span<char const*> desiredDeviceExtensions, 
-				  GLFWwindow* window, uint32_t width, uint32_t height) & -> status_t; 
+				  GLFWwindow* window, uint32_t width, uint32_t height,
+				  std::span<Vertex> vertexInput) & -> status_t; 
 		// TODO init arguments refactored in a customizeable struct, create swapchain only if requested, and create a window class
 		auto draw() & -> status_t;
 		auto resize(uint32_t width, uint32_t height) & -> status_t; // TODO recreate swapchain only if swapchain has been requested
@@ -247,6 +257,12 @@ namespace mxc
 		auto setupGraphicsPipeline() & -> status_t;
 		auto recordCommands(uint32_t framebufferIdx) & -> status_t;
 		auto setupSynchronizationObjects() & -> status_t;
+		auto setupVertexInput(std::span<Vertex> vertexInput) & -> status_t;
+
+		// frequently called
+		// auto createBuffer(/**/) & -> status_t;
+		// auto createImage(/**/) & -> status_t;
+		auto checkMemoryRequirements(VkMemoryRequirements const& memoryRequirements, VkMemoryPropertyFlagBits const& requestedMemoryProperties, uint32_t* outMemoryTypeIndex) & -> status_t;
 
 	private: // data members, dispatchable and non dispatchable vulkan objects handles
 		// vulkan initialization members
@@ -305,6 +321,9 @@ namespace mxc
 		// other vulkan related
 		VkFormat m_depthImageFormat;
 
+		VkBuffer m_vertexBuffer;
+		VkDeviceMemory m_vertexBufferMemory; // TODO refactor everything so that there is only ONE VkDevice Memory, or at least fewer of them
+
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 		VkDebugUtilsMessengerEXT m_dbgMessenger;
 		#define MXC_RENDERER_INSERT_MESSENGER MESSENGER_CREATED
@@ -335,11 +354,11 @@ namespace mxc
 			FRAMEBUFFERS_CREATED = 0x00080000,
 			GRAPHICS_PIPELINE_LAYOUT_CREATED = 0x00040000,
 			GRAPHICS_PIPELINE_CREATED = 0x00020000,
-			SYNCHRONIZATION_OBJECTS_CREATED = 0x00010000
+			SYNCHRONIZATION_OBJECTS_CREATED = 0x00010000,
+			VERTEX_INPUT_BOUND = 0x00008000
 		};
 	
 	private: // functions, utilities
-		
 
 		#ifndef NDEBUG
 		auto dbgPrintInstanceExtensionsAndLayers(std::span<const char*> const& instanceExtensions, std::span<char const*> const& layers) -> void;
@@ -354,7 +373,7 @@ namespace mxc
 			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>()), m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
 			, m_depthImageMemory(VK_NULL_HANDLE), m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
 			, m_swapchain(VK_NULL_HANDLE), m_swapchainImages(VectorCustom<VkImage>()), m_swapchainImageViews(VectorCustom<VkImageView>())
-			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT)
+			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT), m_vertexBuffer(VK_NULL_HANDLE), m_vertexBufferMemory(VK_NULL_HANDLE)
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 			, m_dbgMessenger(VK_NULL_HANDLE)
 #endif
@@ -364,7 +383,8 @@ namespace mxc
 template <template<class> class AllocTemplate> 
 	auto Renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
 									   std::span<char const*> desiredDeviceExtensions,
-									   GLFWwindow* window, uint32_t width, uint32_t height) & -> status_t
+									   GLFWwindow* window, uint32_t width, uint32_t height,
+									   std::span<Vertex> vertexInput) & -> status_t
 	{
 		if (setupInstance(desiredInstanceExtensions)
 			|| setupSurfaceKHR(window) // TODO work in progress, refactor to another class, like "rendererWindowAdaptor" to make renderer and window loosely coupled
@@ -374,6 +394,7 @@ template <template<class> class AllocTemplate>
 			|| setupCommandBuffers()
 			|| setupDepthImage()
 			|| setupDepthDeviceMemory()
+			|| setupVertexInput(vertexInput)
 			|| setupRenderPass()
 			|| setupFramebuffers()
 			|| setupGraphicsPipeline()
@@ -395,6 +416,10 @@ template <template<class> class AllocTemplate>
 		{	
 			vkDeviceWaitIdle(m_device);
 		}
+
+		// destroy vertex buffer
+		vkDestroyBuffer(m_device, m_vertexBuffer, /*VkAllocationCallbacks**/nullptr);
+		vkFreeMemory(m_device, m_vertexBufferMemory, /*VkALlocationCallbacks**/nullptr);
 
 		// Then we can clean everything up. Note that we do not check for successful initialization. That's because
 		// the vkDestroy and vkDeallocate functions can be called when the handle to be destroyed/freed is VK_NULL_HANDLE 
@@ -722,7 +747,7 @@ template <template<class> class AllocTemplate>
 
 			// -- get and store the surface capabilities, an intersection between the display capabilities
 			//    and the physical device capabilities regarding presentation. Needed to create a swapchain ----------------------------------------------
-			// vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevices[i], m_surface, &m_surfaceCapabilities);
+			// vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevices[i], m_surface, &m_surfaceCapabilities); moved to swapchain creation
 			
 			// -- now check for surface format support, we want R8G8B8A8 format, with sRGB nonlinear colorspace. ------------------------------------------
 			// PS=there are more advanced query function to check for more specific features, 
@@ -1061,7 +1086,7 @@ template <template<class> class AllocTemplate>
 		}
 
 		m_progressStatus |= COMMAND_BUFFER_ALLOCATED;
-		printf("created command pool and allocated a resettable and transient command pool");
+		printf("created command pool and allocated a resettable and transient command pool\n");
 		return APP_SUCCESS;
 	}
 
@@ -1138,6 +1163,29 @@ template <template<class> class AllocTemplate>
 		return APP_SUCCESS;
 	}
 
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::checkMemoryRequirements(VkMemoryRequirements const& memoryRequirements, VkMemoryPropertyFlagBits const& requestedMemoryProperties, uint32_t* outMemoryTypeIndex) & -> status_t
+	{		
+		// TODO refactor so that this is done once
+		VkPhysicalDeviceMemoryProperties deviceMemoryProperties; // typecount, types, heapcount, heaps
+		vkGetPhysicalDeviceMemoryProperties(m_phyDevice, &deviceMemoryProperties);
+
+		for (uint32_t i = 0; i < deviceMemoryProperties.memoryTypeCount; ++i)
+		{
+			// VkMemoryRequirements::memoryTypeBits is a bitfield (uint32) whose bits are set to one if the corresponding memory type index(==power of 2) can be used by the resource
+			// so we will: 1) check if current memory type index can be used by resource
+			// 			   2) check if the memory type's properties are suitable to OUR needs
+			if ( (memoryRequirements.memoryTypeBits & (1 << i)) // check if i-th bit is a type usable by resource
+			 	 && (deviceMemoryProperties.memoryTypes[i].propertyFlags & requestedMemoryProperties) == requestedMemoryProperties) // check if type's properties match our needs
+			{
+				*outMemoryTypeIndex = i;
+				printf("----------------------->>>>returning memory type index %u\n", *outMemoryTypeIndex);
+				return APP_SUCCESS;
+			}
+		}
+
+		return APP_GENERIC_ERR;
+	}
+
 	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupDepthDeviceMemory() & -> status_t
 	{
 		assert((m_progressStatus & (DEVICE_CREATED | DEPTH_IMAGE_CREATED)) && "VkDevice required to allocate VkDeviceMemory!\n");
@@ -1147,23 +1195,9 @@ template <template<class> class AllocTemplate>
 		vkGetImageMemoryRequirements(m_device, m_depthImage, &depthImageMemoryRequirements);
 
 		// allocate memory
-		VkPhysicalDeviceMemoryProperties depthImageMemoryProperties; // typecount, types, heapcount, heaps
-		vkGetPhysicalDeviceMemoryProperties(m_phyDevice, &depthImageMemoryProperties);
-
 		// -- for each memory type present in the device, find one that matches our memory requirement
-		uint32_t i = 0u;
-		for (; i < depthImageMemoryProperties.memoryTypeCount; ++i)
-		{
-			// VkMemoryRequirements::memoryTypeBits is a bitfield (uint32) whose bits are set to one if the corresponding memory type index(==power of 2) can be used by the resource
-			// so we will: 1) check if current memory type index can be used by resource
-			// 			   2) check if the memory type's properties are suitable to OUR needs
-			if ( depthImageMemoryRequirements.memoryTypeBits & (1 << i) // check if i-th bit is a type usable by resource
-			 	 && depthImageMemoryProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) // check if type's properties match our needs
-			{
-				break;
-			}
-		}
-		if (i == depthImageMemoryProperties.memoryTypeCount)
+		uint32_t memoryTypeIndex;
+		if (checkMemoryRequirements(depthImageMemoryRequirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memoryTypeIndex) != APP_SUCCESS)
 		{
 			fprintf(stderr, "could not find any suitable memory types to allocate memory for depth image!\n");
 			return APP_GENERIC_ERR;
@@ -1173,7 +1207,7 @@ template <template<class> class AllocTemplate>
 			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 			.pNext = nullptr, // There are many extentions, most of them even platform-specific
 			.allocationSize = depthImageMemoryRequirements.size,
-			.memoryTypeIndex = i // type of memory required, must be supported by device
+			.memoryTypeIndex = memoryTypeIndex // type of memory required, must be supported by device
 		};
 		VkResult const res = vkAllocateMemory(m_device, &allocateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageMemory);
 
@@ -1188,8 +1222,8 @@ template <template<class> class AllocTemplate>
 	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupRenderPass() & -> status_t
 	{
 		// -- create output attachment and references ------------------------------------------------------------------------------------
-		// render pass output attachment descriptions array (for the render pass, we will also need attachment references for the subpasses, which are handles decorated with some data to this array)
-		VkAttachmentDescription const outAttachmentDescriptions[MXC_RENDERER_ATTACHMENT_COUNT] {
+		// render pass output attachment descriptions array (for the render pass, we will also need attachment references for the subpasses, which are handles decorated with some data to this array) VkAttachmentDescription const outAttachmentDescriptions[MXC_RENDERER_ATTACHMENT_COUNT] {
+		VkAttachmentDescription const outAttachmentDescriptions[] {
 			// color attachment
 			{
 				.flags = 0,// only flag is VK_ATTACHMENT_DESCRIPTION_MAY_ALIAS_BIT, which specifies that all attachments use the same device memory. I am not dealing with memory now
@@ -1360,6 +1394,93 @@ template <template<class> class AllocTemplate>
 		return APP_SUCCESS;
 	}
 
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupVertexInput(std::span<Vertex> vertexInput) & -> status_t
+	{
+		assert(m_progressStatus & DEVICE_CREATED);
+		
+		// -- create a vertex buffer -----------------------------------------------------------------------------
+		VkBufferCreateInfo const bufferCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.size = static_cast<VkDeviceSize>(vertexInput.size() * sizeof(Vertex)),
+			.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+			.queueFamilyIndexCount = 1,
+			.pQueueFamilyIndices = nullptr// queueFamilyIndices WRONG! even though we have more than one queue, presentation is not involved
+		};
+		VkResult res = vkCreateBuffer(m_device, &bufferCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_vertexBuffer);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to create a vertex buffer!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+		
+		// TODO refactor to use DEVICE_LOCAL memory, and to use vkFlushMappedMemoryRanges
+		// -- allocate memory for the vertex buffer --------------------------------------------------------------
+		VkMemoryRequirements bufferMemoryRequirements;
+		vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &bufferMemoryRequirements);
+		uint32_t memoryTypeIndex;
+		if (checkMemoryRequirements(bufferMemoryRequirements, static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), &memoryTypeIndex) != APP_SUCCESS)
+		{
+			fprintf(stderr, "couldn't find any suitable memory type for a vertex buffer!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+
+		VkMemoryAllocateInfo const memoryAllocateInfo {
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.pNext = nullptr,
+			.allocationSize = bufferMemoryRequirements.size,
+			.memoryTypeIndex = memoryTypeIndex
+		};
+
+		res = vkAllocateMemory(m_device, &memoryAllocateInfo, /*VkAllocationCallbacks**/nullptr, &m_vertexBufferMemory);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to allocate device memory for vertex buffer!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+
+
+
+		// -- map memory and copy to vertex buffer the data ------------------------------------------------------
+		void* mmappedPtr;
+		res = vkMapMemory(
+			m_device,
+			m_vertexBufferMemory,
+			0, // offset
+			VK_WHOLE_SIZE,
+			0, // flags
+			&mmappedPtr);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to map memory!\n");
+			if (res == VK_ERROR_MEMORY_MAP_FAILED)
+			{
+				printf("VK_ERROR_MEMORY_MAP_FAILED ----------------------\n");
+				return APP_GENERIC_ERR;
+			}
+		}
+
+		memcpy(mmappedPtr, vertexInput.data(), vertexInput.size() * sizeof(Vertex));
+		vkUnmapMemory(m_device, m_vertexBufferMemory);
+		
+		// -- bind buffer to memory (you can do it before or after memory mapping) -----------------------------------------------
+		if (vkBindBufferMemory(m_device, m_vertexBuffer, m_vertexBufferMemory, /*offset*/0) != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to bind memory for vertex buffer!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+
+		printf("vertex input set up!\n");
+		m_progressStatus |= VERTEX_INPUT_BOUND;
+		return APP_SUCCESS;
+	}
+
 	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
 	{
 		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
@@ -1462,17 +1583,23 @@ template <template<class> class AllocTemplate>
 		VkVertexInputBindingDescription const vertInputBindingDescriptions[] {
 			{
 				.binding = 0, // Binding number which this structure is describing. You need a description for each binding in use. TODO we have no binding now
-				.stride = 0, // distance between successive elements in bytes (if attributes are stored interleaved, per vert, then stride = sizeof(Vertex))
+				.stride = sizeof(Vertex), // distance between successive elements in bytes (if attributes are stored interleaved, per vert, then stride = sizeof(Vertex))
 				.inputRate = VK_VERTEX_INPUT_RATE_VERTEX // VkVertexInputRate specifies whether attributes stored in the buffer are PER VERTEX or PER INSTANCE
 			}
 		};
 
-		VkVertexInputAttributeDescription const vertInputAttributeDescriptions[] { // TODO for now I have no attributes but just setting up the skeleton for future use
-			{
+		VkVertexInputAttributeDescription const vertInputAttributeDescriptions[] {
+			{ // position
 				.location = 0,
 				.binding = 0,
 				.format = VK_FORMAT_R32G32B32_SFLOAT, // VkFormat
-				.offset = 0 // in bytes, from the start of the current element
+				.offset = offsetof(Vertex, pos) // in bytes, from the start of the current element
+			},
+			{ // color
+				.location = 1,
+				.binding = 0,
+				.format = VK_FORMAT_R32G32B32_SFLOAT,
+				.offset = offsetof(Vertex, col)
 			}
 		};
 
@@ -1495,10 +1622,15 @@ template <template<class> class AllocTemplate>
 		}; // TODO refactor to make it configurable
 
 		VulkanPipelineConfig graphicsPipelineConfig;
-		graphicsPipelineConfig.rasterizationStateCI.frontFace = VK_FRONT_FACE_CLOCKWISE;
+		graphicsPipelineConfig.rasterizationStateCI.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		graphicsPipelineConfig.colorBlendStateCI.pAttachments = colorBlendAttachmentStates;
 		graphicsPipelineConfig.dynamicStateCI.dynamicStateCount = 2; // TODO make it configurable
 		graphicsPipelineConfig.dynamicStateCI.pDynamicStates = dynamicStates;
+
+		graphicsPipelineConfig.vertexInputStateCI.vertexBindingDescriptionCount = 1; // TODO make it configurable, ie DYNAMIC
+		graphicsPipelineConfig.vertexInputStateCI.pVertexBindingDescriptions = vertInputBindingDescriptions;
+		graphicsPipelineConfig.vertexInputStateCI.vertexAttributeDescriptionCount = 2;
+		graphicsPipelineConfig.vertexInputStateCI.pVertexAttributeDescriptions = vertInputAttributeDescriptions;
 
 		// TODO setup pipeline cache
 		// -- finally assemble the graphics pipeline ------------------------------------------------------------------------------------------------
@@ -1644,6 +1776,10 @@ template <template<class> class AllocTemplate>
 			{
 				// bind graphics pipeline to render pass
 				vkCmdBindPipeline(m_graphicsCmdBufs[framebufferIdx], /*VkPipelineBindPoint*/VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline); // bind point = type of pipeline to bind
+				// bind vertex buffer
+				VkBuffer const vertexBuffers[] {m_vertexBuffer};
+				VkDeviceSize const offsets[] {0}; // offset from beginning to buffer, from which vulkan will bind
+				vkCmdBindVertexBuffers(m_graphicsCmdBufs[framebufferIdx], 0/*first binding*/, 1/*binding count*/, vertexBuffers, offsets);
 
 				// TODO we didn't specify viewport and scissor to be dynamic for now, so no need to vkCmdSet them, but I'll come back
 				VkViewport const viewport {
@@ -1662,7 +1798,7 @@ template <template<class> class AllocTemplate>
 				vkCmdSetViewport(m_graphicsCmdBufs[framebufferIdx], 0/*1st viewport*/, 1/*viewport count*/, &viewport);
 				vkCmdSetScissor(m_graphicsCmdBufs[framebufferIdx], 0/*1st scissor*/, 1/*scissor count*/, &scissor);
 
-				// draw command
+				// draw command. TODO refactor hardcoded numbers
 				vkCmdDraw(m_graphicsCmdBufs[framebufferIdx], /*vertexCount*/3, /*instance count*/1, /*firstVertexID*/0, /*firstInstanceID*/0); // vertex count == how many times to call the vertex shader != how many vertices we have stored in a buffer, instance count == number of times to draw the same primitives
 			}
 			vkCmdEndRenderPass(m_graphicsCmdBufs[framebufferIdx]);
@@ -1806,6 +1942,7 @@ template <template<class> class AllocTemplate>
 	auto Renderer<AllocTemplate>::progress_incomplete() const & -> status_t 
 	{
 		status_t const status = m_progressStatus ^ (
+			VERTEX_INPUT_BOUND |
 			SYNCHRONIZATION_OBJECTS_CREATED |
 			GRAPHICS_PIPELINE_CREATED | 
 			GRAPHICS_PIPELINE_LAYOUT_CREATED |
@@ -1983,10 +2120,16 @@ template <template<class> class AllocTemplate>
 		#endif
 
 		std::vector<char const*, Mallocator<char const*>> desiredDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+		std::vector<Vertex, Mallocator<Vertex>> vertexInput {
+			{{0.f, -0.4f, 0.f}, {1.f, 0.f, 0.f}},
+			{{-0.4f, 0.4f, 0.f}, {0.f, 1.f, 0.f}},
+			{{0.4f, 0.4f, 0.f}, {0.f, 0.f, 1.f}}
+		};
 
 		if (m_renderer.init(std::span(desiredInstanceExtensions.begin(), desiredInstanceExtensions.end()), 
 							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window, 
-							WINDOW_WIDTH, WINDOW_HEIGHT) == APP_GENERIC_ERR)
+							WINDOW_WIDTH, WINDOW_HEIGHT,
+							vertexInput) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}

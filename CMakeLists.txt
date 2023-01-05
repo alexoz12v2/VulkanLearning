@@ -43,10 +43,11 @@ set(RH_STANDALONE_PROJECT OFF)
 # vulkan validation layer tests require more, but I won't use them
 
 target_include_directories(VulkanLearning PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/glfw/include"
-						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/vulkan-headers/include"
-						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/robin-hood-hashing/src/include"
-				    	PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-headers/include"
-						PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-tools/include")
+					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/vulkan-headers/include"
+					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/robin-hood-hashing/src/include"
+					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-headers/include"
+					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/spirv-tools/include"
+					  PUBLIC "${PROJECT_SOURCE_DIR}/dependencies/Eigen")
 add_subdirectory(
 	${PROJECT_SOURCE_DIR}/dependencies/glfw/
 )
@@ -66,6 +67,9 @@ add_subdirectory(
 add_subdirectory(
 	${PROJECT_SOURCE_DIR}/dependencies/spirv-tools
 )
+add_subdirectory(
+	${PROJECT_SOURCE_DIR}/dependencies/Eigen
+)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -77,3 +81,9 @@ FetchContent_MakeAvailable(Vulkan-Loader)
 
 target_link_libraries(VulkanLearning glfw Vulkan::Vulkan)
 
+# copy shaders files in the build directory
+add_custom_command(
+	TARGET VulkanLearning POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+	COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${CMAKE_CURRENT_BINARY_DIR}/shaders
+)

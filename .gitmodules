@@ -19,3 +19,7 @@
 [submodule "robin-hood-hashing"]
 	path = dependencies/robin-hood-hashing
 	url = https://github.com/martinus/robin-hood-hashing
+[submodule "Eigen"]
+	path = dependencies/Eigen
+	url = https://gitlab.com/libeigen/eigen.git
+	branch = 3.4
