@@ -234,7 +234,7 @@ namespace mxc
 		auto init(std::span<char const*> desiredInstanceExtensions, 
 				  std::span<char const*> desiredDeviceExtensions, 
 				  GLFWwindow* window, uint32_t width, uint32_t height,
-				  std::span<Vertex> vertexInput) & -> status_t; 
+				  std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t;  // TODO vert and indices are Temp, need to refactor in their own class
 		// TODO init arguments refactored in a customizeable struct, create swapchain only if requested, and create a window class
 		auto draw() & -> status_t;
 		auto resize(uint32_t width, uint32_t height) & -> status_t; // TODO recreate swapchain only if swapchain has been requested
@@ -257,7 +257,7 @@ namespace mxc
 		auto setupGraphicsPipeline() & -> status_t;
 		auto recordCommands(uint32_t framebufferIdx) & -> status_t;
 		auto setupSynchronizationObjects() & -> status_t;
-		auto setupVertexInput(std::span<Vertex> vertexInput) & -> status_t;
+		auto setupVertexInput(std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t;
 
 		// frequently called
 		// auto createBuffer(/**/) & -> status_t;
@@ -321,8 +321,11 @@ namespace mxc
 		// other vulkan related
 		VkFormat m_depthImageFormat;
 
+		VkBuffer m_stagingBuffer;
 		VkBuffer m_vertexBuffer;
-		VkDeviceMemory m_vertexBufferMemory; // TODO refactor everything so that there is only ONE VkDevice Memory, or at least fewer of them
+		VkBuffer m_indexBuffer;
+		VkDeviceMemory m_inputBuffersMemory; // TODO refactor everything so that there is only ONE VkDevice Memory, or at least fewer of them
+		VkDeviceMemory m_stagingBufferMemory;
 
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 		VkDebugUtilsMessengerEXT m_dbgMessenger;
@@ -373,7 +376,7 @@ namespace mxc
 			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>()), m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
 			, m_depthImageMemory(VK_NULL_HANDLE), m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
 			, m_swapchain(VK_NULL_HANDLE), m_swapchainImages(VectorCustom<VkImage>()), m_swapchainImageViews(VectorCustom<VkImageView>())
-			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT), m_vertexBuffer(VK_NULL_HANDLE), m_vertexBufferMemory(VK_NULL_HANDLE)
+			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT), m_stagingBuffer(VK_NULL_HANDLE), m_vertexBuffer(VK_NULL_HANDLE), m_indexBuffer(VK_NULL_HANDLE), m_inputBuffersMemory(VK_NULL_HANDLE), m_stagingBufferMemory(VK_NULL_HANDLE)
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 			, m_dbgMessenger(VK_NULL_HANDLE)
 #endif
@@ -384,7 +387,7 @@ template <template<class> class AllocTemplate>
 	auto Renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
 									   std::span<char const*> desiredDeviceExtensions,
 									   GLFWwindow* window, uint32_t width, uint32_t height,
-									   std::span<Vertex> vertexInput) & -> status_t
+									   std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t
 	{
 		if (setupInstance(desiredInstanceExtensions)
 			|| setupSurfaceKHR(window) // TODO work in progress, refactor to another class, like "rendererWindowAdaptor" to make renderer and window loosely coupled
@@ -394,7 +397,7 @@ template <template<class> class AllocTemplate>
 			|| setupCommandBuffers()
 			|| setupDepthImage()
 			|| setupDepthDeviceMemory()
-			|| setupVertexInput(vertexInput)
+			|| setupVertexInput(vertexInput, indexInput)
 			|| setupRenderPass()
 			|| setupFramebuffers()
 			|| setupGraphicsPipeline()
@@ -417,9 +420,12 @@ template <template<class> class AllocTemplate>
 			vkDeviceWaitIdle(m_device);
 		}
 
-		// destroy vertex buffer
+		// destroy vertex and index buffers
+		vkDestroyBuffer(m_device, m_stagingBuffer, /*VkAllocationCallbacks**/nullptr);
 		vkDestroyBuffer(m_device, m_vertexBuffer, /*VkAllocationCallbacks**/nullptr);
-		vkFreeMemory(m_device, m_vertexBufferMemory, /*VkALlocationCallbacks**/nullptr);
+		vkDestroyBuffer(m_device, m_indexBuffer, /*VkAllocationCallbacks**/nullptr);
+		vkFreeMemory(m_device, m_inputBuffersMemory, /*VkALlocationCallbacks**/nullptr);
+		vkFreeMemory(m_device, m_stagingBufferMemory, /*VkAllocationCallbacks**/nullptr);
 
 		// Then we can clean everything up. Note that we do not check for successful initialization. That's because
 		// the vkDestroy and vkDeallocate functions can be called when the handle to be destroyed/freed is VK_NULL_HANDLE 
@@ -1394,65 +1400,110 @@ template <template<class> class AllocTemplate>
 		return APP_SUCCESS;
 	}
 
-	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupVertexInput(std::span<Vertex> vertexInput) & -> status_t
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupVertexInput(std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t
 	{
 		assert(m_progressStatus & DEVICE_CREATED);
 		
-		// -- create a vertex buffer -----------------------------------------------------------------------------
-		VkBufferCreateInfo const bufferCreateInfo {
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.size = static_cast<VkDeviceSize>(vertexInput.size() * sizeof(Vertex)),
-			.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.queueFamilyIndexCount = 1,
-			.pQueueFamilyIndices = nullptr// queueFamilyIndices WRONG! even though we have more than one queue, presentation is not involved
+		// -- create a staging, index, vertex buffers -----------------------------------------------------------------------------
+		VkBufferCreateInfo const bufferCreateInfo[] {
+			{ // staging buffer
+				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+				.pNext = nullptr, 
+				.flags = 0,
+				.size = static_cast<VkDeviceSize>(vertexInput.size() * sizeof(Vertex) + indexInput.size() * sizeof(uint32_t)),
+				.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+				.queueFamilyIndexCount = 1,
+				.pQueueFamilyIndices = nullptr
+			},
+			{ // vertex buffer
+				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+				.pNext = nullptr,
+				.flags = 0,
+				.size = static_cast<VkDeviceSize>(vertexInput.size() * sizeof(Vertex)),
+				.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+				.queueFamilyIndexCount = 1,
+				.pQueueFamilyIndices = nullptr// queueFamilyIndices WRONG! even though we have more than one queue, presentation is not involved
+			},
+			{ // index buffer
+				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+				.pNext = nullptr,
+				.flags = 0,
+				.size = static_cast<VkDeviceSize>(indexInput.size() * sizeof(uint32_t)),
+				.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+				.queueFamilyIndexCount = 1,
+				.pQueueFamilyIndices = nullptr
+			}
 		};
-		VkResult res = vkCreateBuffer(m_device, &bufferCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_vertexBuffer);
-		if (res != VK_SUCCESS)
+		if (vkCreateBuffer(m_device, &bufferCreateInfo[0], /*VkAllocationCallbacks**/nullptr, &m_stagingBuffer) != VK_SUCCESS
+			|| vkCreateBuffer(m_device, &bufferCreateInfo[1], /*VkAllocationCallbacks**/nullptr, &m_vertexBuffer) != VK_SUCCESS
+			|| vkCreateBuffer(m_device, &bufferCreateInfo[2], /*VKAllocationCallbacks**/nullptr, &m_indexBuffer) != VK_SUCCESS)
 		{
-			fprintf(stderr, "failed to create a vertex buffer!\n");
+			fprintf(stderr, "failed to create staging, vertex or index buffer!\n");
 			m_progressStatus &= ~VERTEX_INPUT_BOUND;
 			return APP_GENERIC_ERR;
 		}
 		
 		// TODO refactor to use DEVICE_LOCAL memory, and to use vkFlushMappedMemoryRanges
-		// -- allocate memory for the vertex buffer --------------------------------------------------------------
-		VkMemoryRequirements bufferMemoryRequirements;
-		vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &bufferMemoryRequirements);
-		uint32_t memoryTypeIndex;
-		if (checkMemoryRequirements(bufferMemoryRequirements, static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), &memoryTypeIndex) != APP_SUCCESS)
+		// -- allocate memory for the buffers --------------------------------------------------------------
+		// now we are getting an intersection between memory requirements of the vertex buffer and of the index buffer,
+		// because we are going to use the same device memory
+		VkMemoryRequirements bufferMemoryRequirements[2]; // TODO refactor
+
+		// device local memory requirements are an intersection of those of the vertex buffer and of the index buffer
+		vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &bufferMemoryRequirements[0]);
+		vkGetBufferMemoryRequirements(m_device, m_indexBuffer, &bufferMemoryRequirements[1]);
+		size_t const vertexBufferSize = bufferMemoryRequirements[0].size;
+		size_t const indexBufferSize = bufferMemoryRequirements[1].size;
+
+		bufferMemoryRequirements[0].size += bufferMemoryRequirements[1].size;
+		bufferMemoryRequirements[0].alignment = std::max(bufferMemoryRequirements[0].alignment, bufferMemoryRequirements[1].alignment); 
+		bufferMemoryRequirements[0].memoryTypeBits &= bufferMemoryRequirements[1].memoryTypeBits;
+
+		// host visible memory requirements for staging buffer
+		vkGetBufferMemoryRequirements(m_device, m_stagingBuffer, &bufferMemoryRequirements[1]);
+
+		uint32_t memoryTypeIndices[2];
+		if (checkMemoryRequirements(bufferMemoryRequirements[0], static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), &memoryTypeIndices[0]) != APP_SUCCESS
+			|| checkMemoryRequirements(bufferMemoryRequirements[1], static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), &memoryTypeIndices[1]) != APP_SUCCESS)
 		{
-			fprintf(stderr, "couldn't find any suitable memory type for a vertex buffer!\n");
+			fprintf(stderr, "couldn't find any suitable memory type for staging, index or vertex buffer!\n");
 			m_progressStatus &= ~VERTEX_INPUT_BOUND;
 			return APP_GENERIC_ERR;
 		}
 
-		VkMemoryAllocateInfo const memoryAllocateInfo {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-			.pNext = nullptr,
-			.allocationSize = bufferMemoryRequirements.size,
-			.memoryTypeIndex = memoryTypeIndex
+		VkMemoryAllocateInfo const memoryAllocateInfos[2] {
+			{ // device local vertex and index buffers
+				.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.pNext = nullptr,
+				.allocationSize = bufferMemoryRequirements[0].size,
+				.memoryTypeIndex = memoryTypeIndices[0]
+			},
+			{ // host visible staging buffer
+				.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.pNext = nullptr,
+				.allocationSize = bufferMemoryRequirements[1].size,
+				.memoryTypeIndex = memoryTypeIndices[1]
+			}
 		};
 
-		res = vkAllocateMemory(m_device, &memoryAllocateInfo, /*VkAllocationCallbacks**/nullptr, &m_vertexBufferMemory);
-		if (res != VK_SUCCESS)
+		if (vkAllocateMemory(m_device, &memoryAllocateInfos[0], /*VkAllocationCallbacks**/nullptr, &m_inputBuffersMemory) != VK_SUCCESS
+			|| vkAllocateMemory(m_device, &memoryAllocateInfos[1], /*VkAllocationCallbacks*/nullptr, &m_stagingBufferMemory) != VK_SUCCESS)
 		{
 			fprintf(stderr, "failed to allocate device memory for vertex buffer!\n");
 			m_progressStatus &= ~VERTEX_INPUT_BOUND;
 			return APP_GENERIC_ERR;
 		}
 
-
-
-		// -- map memory and copy to vertex buffer the data ------------------------------------------------------
+		// -- map memory and copy to staging buffer the data ------------------------------------------------------
 		void* mmappedPtr;
-		res = vkMapMemory(
+		VkResult res = vkMapMemory(
 			m_device,
-			m_vertexBufferMemory,
+			m_stagingBufferMemory,
 			0, // offset
-			VK_WHOLE_SIZE,
+			VK_WHOLE_SIZE, // size
 			0, // flags
 			&mmappedPtr);
 		if (res != VK_SUCCESS)
@@ -1466,16 +1517,96 @@ template <template<class> class AllocTemplate>
 		}
 
 		memcpy(mmappedPtr, vertexInput.data(), vertexInput.size() * sizeof(Vertex));
-		vkUnmapMemory(m_device, m_vertexBufferMemory);
+		memcpy(reinterpret_cast<unsigned char*>(mmappedPtr)+vertexBufferSize, indexInput.data(), indexInput.size()*sizeof(uint32_t));
+
+		VkMappedMemoryRange const memoryRange {
+			.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+			.pNext = nullptr,
+			.memory = m_stagingBufferMemory,
+			.offset = 0,
+			.size = VK_WHOLE_SIZE
+		};
+		// vkFlushMappedMemoryRanges(m_device, /*memory range count*/1, &memoryRange);
+
+		vkUnmapMemory(m_device, m_stagingBufferMemory);
 		
 		// -- bind buffer to memory (you can do it before or after memory mapping) -----------------------------------------------
-		if (vkBindBufferMemory(m_device, m_vertexBuffer, m_vertexBufferMemory, /*offset*/0) != VK_SUCCESS)
+		if (vkBindBufferMemory(m_device, m_stagingBuffer, m_stagingBufferMemory, /*offset*/0) != VK_SUCCESS 
+			|| vkBindBufferMemory(m_device, m_vertexBuffer, m_inputBuffersMemory, /*offset*/0) != VK_SUCCESS
+			|| vkBindBufferMemory(m_device, m_indexBuffer, m_inputBuffersMemory, /*offset*/vertexBufferSize) != VK_SUCCESS)
 		{
-			fprintf(stderr, "failed to bind memory for vertex buffer!\n");
+			fprintf(stderr, "failed to bind memory for vertex or index buffer!\n");
 			m_progressStatus &= ~VERTEX_INPUT_BOUND;
 			return APP_GENERIC_ERR;
 		}
 
+		// -- record and submit copy operation in a local command buffer ---------------------------------------------------------
+		VkCommandBuffer copyCommandBuffer;
+		VkCommandBufferAllocateInfo const copyCommandBufferCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.pNext = nullptr,
+			.commandPool = m_graphicsCmdPool,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = 1 // ?
+		};
+		res = vkAllocateCommandBuffers(m_device, &copyCommandBufferCreateInfo, &copyCommandBuffer);
+		
+		VkCommandBufferBeginInfo const beginInfo {
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+			.pNext = nullptr,
+			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			.pInheritanceInfo = nullptr // only for secondary cmd bufs
+		};
+		res = vkBeginCommandBuffer(copyCommandBuffer, &beginInfo);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to begin recording of copy command!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+		
+		VkBufferCopy regions[2] {
+			{ // vertex buffer
+				.srcOffset = 0,
+				.dstOffset = 0,
+				.size = vertexBufferSize
+			},
+			{ // index buffer
+				.srcOffset = vertexBufferSize,
+				.dstOffset = 0, // the offset given here is added to the offset given to the memory
+				.size = indexBufferSize
+			}
+		};
+		vkCmdCopyBuffer(copyCommandBuffer, m_stagingBuffer, m_vertexBuffer, /*regionCount*/1, &regions[0]);
+		vkCmdCopyBuffer(copyCommandBuffer, m_stagingBuffer, m_indexBuffer, /*regionCount*/1, &regions[1]);
+
+		res = vkEndCommandBuffer(copyCommandBuffer);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to end copy command buffer!\n");
+			m_progressStatus &= ~VERTEX_INPUT_BOUND;
+			return APP_GENERIC_ERR;
+		}
+
+		// TODO setup proper synchronization. Now we will vkQueueIdle
+		VkSubmitInfo const submitInfo {
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+			.pNext = nullptr,
+			.waitSemaphoreCount = 0,
+			.pWaitSemaphores = nullptr,
+			.pWaitDstStageMask = nullptr,
+			.commandBufferCount = 1,
+			.pCommandBuffers = &copyCommandBuffer,
+			.signalSemaphoreCount = 0,
+			.pSignalSemaphores = nullptr
+		};
+
+		uint32_t queue = static_cast<uint32_t>(m_queueIdx.graphics);
+		vkQueueSubmit(m_queues[0], /*submit count*/1, &submitInfo, /*fence to signal when finished*/VK_NULL_HANDLE);
+		vkQueueWaitIdle(m_queues[0]); // TODO remove
+
+		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, copyCommandBufferCreateInfo.commandBufferCount, &copyCommandBuffer);
+		
 		printf("vertex input set up!\n");
 		m_progressStatus |= VERTEX_INPUT_BOUND;
 		return APP_SUCCESS;
@@ -1776,10 +1907,12 @@ template <template<class> class AllocTemplate>
 			{
 				// bind graphics pipeline to render pass
 				vkCmdBindPipeline(m_graphicsCmdBufs[framebufferIdx], /*VkPipelineBindPoint*/VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline); // bind point = type of pipeline to bind
-				// bind vertex buffer
+
+				// bind vertex and index buffers
 				VkBuffer const vertexBuffers[] {m_vertexBuffer};
 				VkDeviceSize const offsets[] {0}; // offset from beginning to buffer, from which vulkan will bind
 				vkCmdBindVertexBuffers(m_graphicsCmdBufs[framebufferIdx], 0/*first binding*/, 1/*binding count*/, vertexBuffers, offsets);
+				vkCmdBindIndexBuffer(m_graphicsCmdBufs[framebufferIdx], m_indexBuffer, /*offset*/0, VK_INDEX_TYPE_UINT32);
 
 				// TODO we didn't specify viewport and scissor to be dynamic for now, so no need to vkCmdSet them, but I'll come back
 				VkViewport const viewport {
@@ -1799,7 +1932,8 @@ template <template<class> class AllocTemplate>
 				vkCmdSetScissor(m_graphicsCmdBufs[framebufferIdx], 0/*1st scissor*/, 1/*scissor count*/, &scissor);
 
 				// draw command. TODO refactor hardcoded numbers
-				vkCmdDraw(m_graphicsCmdBufs[framebufferIdx], /*vertexCount*/3, /*instance count*/1, /*firstVertexID*/0, /*firstInstanceID*/0); // vertex count == how many times to call the vertex shader != how many vertices we have stored in a buffer, instance count == number of times to draw the same primitives
+				// vkCmdDraw(m_graphicsCmdBufs[framebufferIdx], /*vertexCount*/3, /*instance count*/1, /*firstVertexID*/0, /*firstInstanceID*/0); // vertex count == how many times to call the vertex shader != how many vertices we have stored in a buffer, instance count == number of times to draw the same primitives
+				vkCmdDrawIndexed(m_graphicsCmdBufs[framebufferIdx], /*indexCount*/3, /*instanceCount*/1, /*firstIndexID*/0, /*vertexOffset*/0, /*firstInstance*/0);
 			}
 			vkCmdEndRenderPass(m_graphicsCmdBufs[framebufferIdx]);
 		}
@@ -2125,11 +2259,14 @@ template <template<class> class AllocTemplate>
 			{{-0.4f, 0.4f, 0.f}, {0.f, 1.f, 0.f}},
 			{{0.4f, 0.4f, 0.f}, {0.f, 0.f, 1.f}}
 		};
+		std::vector<uint32_t, Mallocator<uint32_t>> indexInput {
+			0, 1, 2
+		};
 
 		if (m_renderer.init(std::span(desiredInstanceExtensions.begin(), desiredInstanceExtensions.end()), 
 							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window, 
 							WINDOW_WIDTH, WINDOW_HEIGHT,
-							vertexInput) == APP_GENERIC_ERR)
+							vertexInput, indexInput) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}
