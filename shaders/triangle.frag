@@ -4,11 +4,10 @@
 // which in our case is a 4D color value
 struct VertexOut
 {
-	float4 posH : SV_Position;
-	float4 color : COLOR;
+	[[vk::location(0)]] float4 color : COLOR;
 };
 
-float4 main(VertexOut vsOut) : SV_Target
+float4 main(VertexOut vsOut) : SV_TARGET
 {
 	return vsOut.color;
 }

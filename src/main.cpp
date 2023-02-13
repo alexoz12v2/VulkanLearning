@@ -23,12 +23,15 @@
 #include <limits>
 #include <iostream>
 
+// TODO setup one descriptor uniform buffer per image or add synchronization to uniform buffer to make it so that uniform data can be updated dynamically
+// TODO setup every step in a single function. e.g. group all buffer creations, currently scattered throughout initialization functions (Renderer class)
+//	and put them in a single function, which can be parametrized
 // TODO IMPORTANT BUG: when opened from executable the game doesn't lauch. Thats because the build doesn't contain the compiled shaders. 
-//		Either change current directory or at build copy shader folders (only .spv files)
+//	Either change current directory or at build copy shader folders (only .spv files)
 // TODO change naming convention from snake_case to camelCase for vars and PascalCase for types
 // TODO register_extensions and setupInstance manage a lot of memory, and they should have allocated
-// 		void* in the beginning as working buffers, instead of allocating on demand, therefore reducing
-// 		number of allocations and casts needed
+// 	void* in the beginning as working buffers, instead of allocating on demand, therefore reducing
+// 	number of allocations and casts needed
 // TODO remove all std:: usage (except for platform abstraction and type support facilities). example: remove std::vector
 // TODO setup macro for compiler specific restrict keyword. Eg. __restrict__ for g++/clang, __restrict for MSVC, and forceinline, attribute(force_inline) for g++/clang, and __force_inline__ for MSVC
 // TODO add constexpr where fit
@@ -77,7 +80,7 @@ template<class T, class U>
 bool operator!=(const Mallocator <T>&, const Mallocator <U>&) { return false; }
 // NOTE: glfwGetGammaRamp to get the monitor's gamma
 // NOTE: to get started more "smoothly", I WILL NOT DO CUSTOM ALLOCATION IN THIS MOCK APPLICATION
-// 		 subsequent Vulkan trainings will include more as I learn from scratch graphics development
+//	 subsequent Vulkan trainings will include more as I learn from scratch graphics development
 
 #define WINDOW_WIDTH 600
 #define WINDOW_HEIGHT 480
@@ -234,10 +237,12 @@ namespace mxc
 		auto init(std::span<char const*> desiredInstanceExtensions, 
 				  std::span<char const*> desiredDeviceExtensions, 
 				  GLFWwindow* window, uint32_t width, uint32_t height,
-				  std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t;  // TODO vert and indices are Temp, need to refactor in their own class
+				  std::span<Vertex> vertexInput, std::span<uint32_t> indexInput,
+				  Eigen::Transform<float,3,Eigen::Affine> const& affineTransform) & -> status_t;  // TODO vert and indices are Temp, need to refactor in their own class. Uniform data == affine transform is temporary
 		// TODO init arguments refactored in a customizeable struct, create swapchain only if requested, and create a window class
 		auto draw() & -> status_t;
 		auto resize(uint32_t width, uint32_t height) & -> status_t; // TODO recreate swapchain only if swapchain has been requested
+		auto updateUniformBuffer(uint32_t framebufferIdx) -> status_t;
 
 	public: // public function, utilities
 		auto progress_incomplete() const & -> status_t; // TODO: const correct and ref correct members
@@ -249,7 +254,6 @@ namespace mxc
 		auto setupDeviceAndQueues(std::span<char const*> const& deviceExtensions) & -> status_t;
 		auto setupSwapchain(uint32_t width, uint32_t height) & -> status_t;
 		auto setupCommandBuffers() & -> status_t;
-		// auto setupStagingBuffer() & -> status_t;
 		auto setupDepthImage() & -> status_t;
 		auto setupDepthDeviceMemory() & -> status_t;
 		auto setupRenderPass() & -> status_t;
@@ -258,11 +262,13 @@ namespace mxc
 		auto recordCommands(uint32_t framebufferIdx) & -> status_t;
 		auto setupSynchronizationObjects() & -> status_t;
 		auto setupVertexInput(std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t;
+		auto setupDescriptorSets(Eigen::Transform<float,3,Eigen::Affine> const& affineTransform) & -> status_t;
 
 		// frequently called
 		// auto createBuffer(/**/) & -> status_t;
 		// auto createImage(/**/) & -> status_t;
 		auto checkMemoryRequirements(VkMemoryRequirements const& memoryRequirements, VkMemoryPropertyFlagBits const& requestedMemoryProperties, uint32_t* outMemoryTypeIndex) & -> status_t;
+		auto printVkResultValue(VkResult res) const & -> void;
 
 	private: // data members, dispatchable and non dispatchable vulkan objects handles
 		// vulkan initialization members
@@ -321,11 +327,22 @@ namespace mxc
 		// other vulkan related
 		VkFormat m_depthImageFormat;
 
+		// input vertex data
 		VkBuffer m_stagingBuffer;
 		VkBuffer m_vertexBuffer;
 		VkBuffer m_indexBuffer;
 		VkDeviceMemory m_inputBuffersMemory; // TODO refactor everything so that there is only ONE VkDevice Memory, or at least fewer of them
 		VkDeviceMemory m_stagingBufferMemory;
+
+		// descriptor sets
+		VectorCustom<VkDescriptorSetLayout> m_descriptorSetLayouts;
+		VkDescriptorPool m_descriptorPool;
+		VectorCustom<VkDescriptorSet> m_descriptorSets;
+		VectorCustom<VkBuffer> m_descriptorBuffers; // one for each command buffer, so that we can update uniform data without synchronization
+		VkDeviceMemory m_descriptorsBufferMemory;
+		void* m_descriptorBuffersMemoryMappedPtr;
+		VkDeviceSize m_uniformBufferSize;
+		Eigen::Transform<float,3,Eigen::Affine> m_transform; // TODO refactor
 
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 		VkDebugUtilsMessengerEXT m_dbgMessenger;
@@ -358,7 +375,8 @@ namespace mxc
 			GRAPHICS_PIPELINE_LAYOUT_CREATED = 0x00040000,
 			GRAPHICS_PIPELINE_CREATED = 0x00020000,
 			SYNCHRONIZATION_OBJECTS_CREATED = 0x00010000,
-			VERTEX_INPUT_BOUND = 0x00008000
+			VERTEX_INPUT_BOUND = 0x00008000,
+			DESCRIPTOR_SETS_SETUP = 0x00004000
 		};
 	
 	private: // functions, utilities
@@ -368,15 +386,20 @@ namespace mxc
 		#endif
 	};
 
+	static constexpr VkSurfaceCapabilitiesKHR defaultSurfaceCapabilities{};
+
 	template <template<class> class AllocTemplate> Renderer<AllocTemplate>::Renderer() 
 			: m_instance(VK_NULL_HANDLE), m_phyDevice(VK_NULL_HANDLE), m_device(VK_NULL_HANDLE)
 			, m_queueIdxArr{-1}, m_queues{VK_NULL_HANDLE} // TODO Don't forget to update m_queueIdxArr when adding queue types
 			, m_graphicsCmdPool(VK_NULL_HANDLE), m_graphicsCmdBufs(VectorCustom<VkCommandBuffer>(0)), m_renderPass(VK_NULL_HANDLE)
+			, m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE), m_depthImageMemory(VK_NULL_HANDLE)
 			, m_framebuffers(VectorCustom<VkFramebuffer>()), m_graphicsPipeline(VK_NULL_HANDLE), m_graphicsPipelineLayout(VK_NULL_HANDLE)
-			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>()), m_depthImage(VK_NULL_HANDLE), m_depthImageView(VK_NULL_HANDLE)
-			, m_depthImageMemory(VK_NULL_HANDLE), m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed(VK_FORMAT_UNDEFINED), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities({0})
+			, m_fenceInFlightFrame(VectorCustom<VkFence>()), m_semaphoreImageAvailable(VectorCustom<VkSemaphore>()), m_semaphoreRenderFinished(VectorCustom<VkSemaphore>())
+			, m_surface(VK_NULL_HANDLE), m_surfaceFormatUsed({.format=VK_FORMAT_UNDEFINED,.colorSpace=VK_COLOR_SPACE_SRGB_NONLINEAR_KHR}), m_presentModeUsed(VK_PRESENT_MODE_FIFO_KHR), m_surfaceCapabilities(defaultSurfaceCapabilities)
 			, m_swapchain(VK_NULL_HANDLE), m_swapchainImages(VectorCustom<VkImage>()), m_swapchainImageViews(VectorCustom<VkImageView>())
 			, m_surfaceExtent(VkExtent2D{0,0}), m_depthImageFormat(VK_FORMAT_D32_SFLOAT), m_stagingBuffer(VK_NULL_HANDLE), m_vertexBuffer(VK_NULL_HANDLE), m_indexBuffer(VK_NULL_HANDLE), m_inputBuffersMemory(VK_NULL_HANDLE), m_stagingBufferMemory(VK_NULL_HANDLE)
+			, m_descriptorSetLayouts(VectorCustom<VkDescriptorSetLayout>()), m_descriptorPool(VK_NULL_HANDLE), m_descriptorSets(VectorCustom<VkDescriptorSet>(0)), m_descriptorBuffers(VectorCustom<VkBuffer>(0))
+			, m_descriptorsBufferMemory(VK_NULL_HANDLE), m_descriptorBuffersMemoryMappedPtr(nullptr), m_uniformBufferSize(0), m_transform(Eigen::Transform<float,3,Eigen::Affine>::Identity())
 #ifndef NDEBUG // CMAKE_BUILD_TYPE=Debug
 			, m_dbgMessenger(VK_NULL_HANDLE)
 #endif
@@ -387,8 +410,10 @@ template <template<class> class AllocTemplate>
 	auto Renderer<AllocTemplate>::init(std::span<char const*> desiredInstanceExtensions, 
 									   std::span<char const*> desiredDeviceExtensions,
 									   GLFWwindow* window, uint32_t width, uint32_t height,
-									   std::span<Vertex> vertexInput, std::span<uint32_t> indexInput) & -> status_t
+									   std::span<Vertex> vertexInput, std::span<uint32_t> indexInput,
+									   Eigen::Transform<float,3,Eigen::Affine> const& affineTransform) & -> status_t
 	{
+		m_transform = affineTransform;
 		if (setupInstance(desiredInstanceExtensions)
 			|| setupSurfaceKHR(window) // TODO work in progress, refactor to another class, like "rendererWindowAdaptor" to make renderer and window loosely coupled
 			|| setupPhyDevice(desiredDeviceExtensions)
@@ -398,6 +423,7 @@ template <template<class> class AllocTemplate>
 			|| setupDepthImage()
 			|| setupDepthDeviceMemory()
 			|| setupVertexInput(vertexInput, indexInput)
+			|| setupDescriptorSets(affineTransform)
 			|| setupRenderPass()
 			|| setupFramebuffers()
 			|| setupGraphicsPipeline()
@@ -419,6 +445,18 @@ template <template<class> class AllocTemplate>
 		{	
 			vkDeviceWaitIdle(m_device);
 		}
+
+		// destroy descriptor set, descriptor set layout and free its memory
+		for (uint32_t i = 0; i < m_descriptorSetLayouts.size(); ++i)
+			vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayouts[0], /*VkAllocationCallbacks**/nullptr);
+
+		vkFreeDescriptorSets(m_device, m_descriptorPool, m_descriptorSets.size(), m_descriptorSets.data());
+		vkDestroyDescriptorPool(m_device, m_descriptorPool, /*VkAllocationCallbacks**/nullptr);
+
+		for (uint32_t i = 0; i < m_descriptorBuffers.size(); ++i)
+			vkDestroyBuffer(m_device, m_descriptorBuffers[i], /*VkALlocationCallbacks**/nullptr);
+
+		vkFreeMemory(m_device, m_descriptorsBufferMemory, /*VkAllocationCallbacks**/nullptr);
 
 		// destroy vertex and index buffers
 		vkDestroyBuffer(m_device, m_stagingBuffer, /*VkAllocationCallbacks**/nullptr);
@@ -508,10 +546,10 @@ template <template<class> class AllocTemplate>
 	 */
 	VKAPI_ATTR
 	static auto VKAPI_CALL debugCallback(
-		VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
-		VkDebugUtilsMessageTypeFlagsEXT message_type,
+		[[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+		[[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT message_type,
 		VkDebugUtilsMessengerCallbackDataEXT const* pcallback_data,
-		void* puser_data
+		[[maybe_unused]] void* puser_data
 	) -> VkBool32
 	{
 		// TODO maybe it's better to put it in a file?
@@ -593,6 +631,8 @@ template <template<class> class AllocTemplate>
 		// create info for the debug messenger, passed first as extension to the instance create info and then used to create msger
 		VkDebugUtilsMessengerCreateInfoEXT const dbgMsgerCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+			.pNext = nullptr,
+			.flags = 0,
 			.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT
 							 | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
 							 | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
@@ -724,8 +764,8 @@ template <template<class> class AllocTemplate>
 				vkGetPhysicalDeviceQueueFamilyProperties(phyDevices[i], &enumerateCounter, queueFamilyProperties.data());
 				for (uint32_t j = 0u; j < queueFamilyProperties.size(); ++j) // TODO refactor this to be more flexible
 				{
-					if (m_queueIdx.graphics == -1 
-						&& 0 != queueFamilyProperties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+					if ((m_queueIdx.graphics == -1) 
+						&& (0 != (queueFamilyProperties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)))
 					{
 						m_queueIdx.graphics = j;
 					}
@@ -773,7 +813,7 @@ template <template<class> class AllocTemplate>
 				{
 					// NOTE: format undefined, returned by vkGetPhysicalDeviceSurfaceFormatsKHR means all formats are supported under the associated color space
 					if (surfaceFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-						&& (surfaceFormats[i].format == VK_FORMAT_UNDEFINED || surfaceFormats[i].format == VK_FORMAT_R8G8B8A8_UNORM || VK_FORMAT_B8G8R8A8_UNORM))
+						&& (surfaceFormats[i].format == VK_FORMAT_UNDEFINED || surfaceFormats[i].format == VK_FORMAT_R8G8B8A8_UNORM || surfaceFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM))
 					{
 						m_surfaceFormatUsed = surfaceFormats[i];
 						break;
@@ -805,7 +845,7 @@ template <template<class> class AllocTemplate>
 				vkGetPhysicalDeviceSurfacePresentModesKHR(phyDevices[i], m_surface, &enumerateCounter, surfacePresentModes.data());
 				for (uint32_t i = 0u; i < surfacePresentModes.size(); ++i)
 				{
-					if (surfacePresentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR);
+					if (surfacePresentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
 					{
 						m_presentModeUsed = VK_PRESENT_MODE_MAILBOX_KHR;
 						break;
@@ -900,8 +940,11 @@ template <template<class> class AllocTemplate>
 		VkDeviceCreateInfo const deviceCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 			.pNext = nullptr, // TODO explore extensions in future
+			.flags = 0,
 			.queueCreateInfoCount = static_cast<uint32_t>(deviceQueueCreateInfos.size()),
 			.pQueueCreateInfos = deviceQueueCreateInfos.data(), 
+			.enabledLayerCount = 0, // DEPRECATED
+			.ppEnabledLayerNames = nullptr, // DEPRECATED
 			.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size()),
 			.ppEnabledExtensionNames = deviceExtensions.data(),
 			.pEnabledFeatures = nullptr // feature specification is OPTIONAL, VkPhysicalDeviceFeatures* TODO add---------------------------------------------------------- init params
@@ -924,7 +967,7 @@ template <template<class> class AllocTemplate>
 		// -- store queue handles --------------------------------------------------------------------------------------------------------------
 		for (uint32_t i = 0u; i < MXC_RENDERER_QUEUES_COUNT; ++i)
 		{
-			vkGetDeviceQueue(m_device, m_queueIdx.graphics, /*queue index within the family*/0u, &m_queues[i]);// TODO change when supporting more than 1 queue within a queue family
+			vkGetDeviceQueue(m_device, m_queueIdx.graphics, /*queue index within the family*/0u, &m_queues[i]); // TODO change when supporting more than 1 queue within a queue family
 		}
 
 		return APP_SUCCESS;
@@ -964,7 +1007,7 @@ template <template<class> class AllocTemplate>
 		// if the graphics and presentation queue (TODO might change as these change) belong to the 
 		// same queue family, or not. the swapchain needs to know about how many and which queue families it will
 		// deal with. TODO to refactor out when structure of family queue indices will change. in particular, if and when we decide to use more than one queue per family this has to change
-		uint32_t const queueFamilyCnt = 1u + (m_queueIdx.graphics == m_queueIdx.presentation);
+		uint32_t const queueFamilyCnt = 1u + (m_queueIdx.graphics == m_queueIdx.presentation); 
 		uint32_t const queueFamilyIndices[2] = {static_cast<uint32_t>(m_queueIdx.graphics), static_cast<uint32_t>(m_queueIdx.presentation)};
 		
 		
@@ -1000,22 +1043,22 @@ template <template<class> class AllocTemplate>
 			return APP_SWAPCHAIN_CREATION_ERR;
 		}
 
-		vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr);
-		m_swapchain = swapchain;
-		m_progressStatus |= SWAPCHAIN_CREATED;
-		printf("swapchain created!\n");
+		vkDestroySwapchainKHR(m_device, m_swapchain, /*VkAllocationCallbacks**/nullptr); 
+		m_swapchain = swapchain; 
+		m_progressStatus |= SWAPCHAIN_CREATED; 
+		printf("swapchain created!\n"); 
 
 		// -- get images from swapchain and create associated image views --------------------------------------------------------------------
 		{
-			uint32_t swapchainImagesCnt;
-			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, nullptr);
-			assert(swapchainImagesCnt);
-			m_swapchainImages.resize(swapchainImagesCnt);
-			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, m_swapchainImages.data());
+			uint32_t swapchainImagesCnt; 
+			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, nullptr); 
+			assert(swapchainImagesCnt); 
+			m_swapchainImages.resize(swapchainImagesCnt); 
+			vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImagesCnt, m_swapchainImages.data()); 
 		}
 
 		// TODO refactor image view creation
-		m_swapchainImageViews.resize(m_swapchainImages.size());
+		m_swapchainImageViews.resize(m_swapchainImages.size()); 
 		for (uint32_t i = 0u; i < m_swapchainImageViews.size(); ++i)
 		{
 			VkImageViewCreateInfo const image_view_create_info = {
@@ -1169,6 +1212,74 @@ template <template<class> class AllocTemplate>
 		return APP_SUCCESS;
 	}
 
+	// TODO dependant on supported exts
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::printVkResultValue(VkResult res) const & -> void
+	{
+		switch (res)
+		{
+		    case VK_SUCCESS: fprintf(stderr, "VK_SUCCESS\n"); break;
+		    case VK_NOT_READY: fprintf(stderr, "VK_NOT_READY\n"); break;
+		    case VK_TIMEOUT: fprintf(stderr, "VK_TIMEOUT\n"); break;
+		    case VK_EVENT_SET: fprintf(stderr, "VK_EVENT_SET\n"); break;
+		    case VK_EVENT_RESET: fprintf(stderr, "VK_EVENT_RESET\n"); break;
+		    case VK_INCOMPLETE: fprintf(stderr, "VK_INCOMPLETE\n"); break;
+		    case VK_ERROR_OUT_OF_HOST_MEMORY: fprintf(stderr, "VK_ERROR_OUT_OF_HOST_MEMORY\n"); break;
+		    case VK_ERROR_OUT_OF_DEVICE_MEMORY: fprintf(stderr, "VK_ERROR_OUT_OF_DEVICE_MEMORY\n"); break;
+		    case VK_ERROR_INITIALIZATION_FAILED: fprintf(stderr, "VK_ERROR_INITIALIZATION_FAILED\n"); break;
+		    case VK_ERROR_DEVICE_LOST: fprintf(stderr, "VK_ERROR_DEVICE_LOST\n"); break;
+		    case VK_ERROR_MEMORY_MAP_FAILED: fprintf(stderr, "VK_ERROR_MEMORY_MAP_FAILED\n"); break;
+		    case VK_ERROR_LAYER_NOT_PRESENT: fprintf(stderr, "VK_ERROR_LAYER_NOT_PRESENT\n"); break;
+		    case VK_ERROR_EXTENSION_NOT_PRESENT: fprintf(stderr, "VK_ERROR_EXTENSION_NOT_PRESENT\n"); break;
+		    case VK_ERROR_FEATURE_NOT_PRESENT: fprintf(stderr, "VK_ERROR_FEATURE_NOT_PRESENT\n"); break;
+		    case VK_ERROR_INCOMPATIBLE_DRIVER: fprintf(stderr, "VK_ERROR_INCOMPATIBLE_DRIVER\n"); break;
+		    case VK_ERROR_TOO_MANY_OBJECTS: fprintf(stderr, "VK_ERROR_TOO_MANY_OBJECTS\n"); break;
+		    case VK_ERROR_FORMAT_NOT_SUPPORTED: fprintf(stderr, "VK_ERROR_FORMAT_NOT_SUPPORTED\n"); break;
+		    case VK_ERROR_FRAGMENTED_POOL: fprintf(stderr, "VK_ERROR_FRAGMENTED_POOL\n"); break;
+		    case VK_ERROR_UNKNOWN: fprintf(stderr, "VK_ERROR_UNKNOWN\n"); break;
+			// provided by VK_VERSION_1_1
+		    case VK_ERROR_OUT_OF_POOL_MEMORY: fprintf(stderr, "VK_ERROR_OUT_OF_POOL_MEMORY\n"); break;
+			// provided by VK_VERSION_1_1
+		    case VK_ERROR_INVALID_EXTERNAL_HANDLE: fprintf(stderr, "VK_ERROR_INVALID_EXTERNAL_HANDLE\n"); break;
+			// provided by VK_VERSION_1_2
+		    case VK_ERROR_FRAGMENTATION: fprintf(stderr, "VK_ERROR_FRAGMENTATION\n"); break;
+			// provided by VK_VERSION_1_2
+		    case VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS: fprintf(stderr, "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS\n"); break;
+			// provided by VK_VERSION_1_3
+		    case VK_PIPELINE_COMPILE_REQUIRED: fprintf(stderr, "VK_PIPELINE_COMPILE_REQUIRED\n"); break;
+			// provided by VK_KHR_surface
+		    case VK_ERROR_SURFACE_LOST_KHR: fprintf(stderr, "VK_ERROR_SURFACE_LOST_KHR\n"); break;
+			// provided by VK_KHR_surface
+		    case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: fprintf(stderr, "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR\n"); break;
+			// provided by VK_KHR_swapchain
+		    case VK_SUBOPTIMAL_KHR: fprintf(stderr, "VK_SUBOPTIMAL_KHR\n"); break;
+			// provided by VK_KHR_swapchain
+		    case VK_ERROR_OUT_OF_DATE_KHR: fprintf(stderr, "VK_ERROR_OUT_OF_DATE_KHR\n"); break;
+			// provided by VK_KHR_display_swapchain
+		    case VK_ERROR_INCOMPATIBLE_DISPLAY_KHR: fprintf(stderr, "VK_ERROR_INCOMPATIBLE_DISPLAY_KHR\n"); break;
+			// provided by VK_EXT_debug_report
+		    case VK_ERROR_VALIDATION_FAILED_EXT: fprintf(stderr, "VK_ERROR_VALIDATION_FAILED_EXT\n"); break;
+			// provided by VK_NV_glsl_shader
+		    case VK_ERROR_INVALID_SHADER_NV: fprintf(stderr, "VK_ERROR_INVALID_SHADER_NV\n"); break;
+			// provided by VK_EXT_image_drm_format_modifier
+		    case VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT: fprintf(stderr, "VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT\n"); break;
+			// provided by VK_KHR_global_priority
+		    case VK_ERROR_NOT_PERMITTED_KHR: fprintf(stderr, "VK_ERROR_NOT_PERMITTED_KHR\n"); break;
+			// provided by VK_EXT_full_screen_exclusive
+		    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT: fprintf(stderr, "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT\n"); break;
+			// provided by VK_KHR_deferred_host_operations
+			case VK_THREAD_IDLE_KHR: fprintf(stderr, "VK_THREAD_IDLE_KHR\n"); break;
+			// provided by VK_KHR_deferred_host_operations
+			case VK_THREAD_DONE_KHR: fprintf(stderr, "VK_THREAD_DONE_KHR\n"); break;
+			// provided by VK_KHR_deferred_host_operations
+			case VK_OPERATION_DEFERRED_KHR: fprintf(stderr, "VK_OPERATION_DEFERRED_KHR\n"); break;
+			// provided by VK_KHR_deferred_host_operations
+			case VK_OPERATION_NOT_DEFERRED_KHR: fprintf(stderr, "VK_OPERATION_NOT_DEFERRED_KHR\n"); break;
+			// provided by VK_EXT_image_compression_control
+		    case VK_ERROR_COMPRESSION_EXHAUSTED_EXT: fprintf(stderr, "VK_ERROR_COMPRESSION_EXHAUSTED_EXT\n"); break;
+			case VK_RESULT_MAX_ENUM: break;
+		}
+	}
+
 	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::checkMemoryRequirements(VkMemoryRequirements const& memoryRequirements, VkMemoryPropertyFlagBits const& requestedMemoryProperties, uint32_t* outMemoryTypeIndex) & -> status_t
 	{		
 		// TODO refactor so that this is done once
@@ -1216,6 +1327,11 @@ template <template<class> class AllocTemplate>
 			.memoryTypeIndex = memoryTypeIndex // type of memory required, must be supported by device
 		};
 		VkResult const res = vkAllocateMemory(m_device, &allocateInfo, /*VkAllocationCallbacks**/nullptr, &m_depthImageMemory);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "allocation didn't pass the check\n");
+			return APP_GENERIC_ERR;
+		}
 
 		// bind allocated memory to depth image
 		vkBindImageMemory(m_device, m_depthImage, m_depthImageMemory, 0); // last parameter is offset TODO this means that in one memory heap we can allocate more than one image!
@@ -1317,6 +1433,16 @@ template <template<class> class AllocTemplate>
 							   //| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 
 				.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
 				.dependencyFlags = 0
+			},
+			// depth attachment
+			{
+				.srcSubpass = VK_SUBPASS_EXTERNAL,
+				.dstSubpass = 0,
+				.srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+				.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+				.dependencyFlags = 0
 			}
 		};
 
@@ -1333,7 +1459,7 @@ template <template<class> class AllocTemplate>
 			.pDependencies = subpassDependencies//TODO
 		};
 		
-		printf("we created %u subpass dependencies!\n", sizeof(subpassDependencies)/sizeof(VkSubpassDependency));
+		printf("we created %lu subpass dependencies!\n", sizeof(subpassDependencies)/sizeof(VkSubpassDependency));
 
 		VkResult const res = vkCreateRenderPass(m_device, &renderPassCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_renderPass);
 		if (res != VK_SUCCESS)
@@ -1395,7 +1521,7 @@ template <template<class> class AllocTemplate>
 			usedAttachments[0] = m_swapchainImageViews[i+1]; // will go out of bounds in last iteration, but won't be read
 		}
 
-		printf("%u framebuffers created!\n", m_framebuffers.size());
+		printf("%lu framebuffers created!\n", m_framebuffers.size());
 		m_progressStatus |= FRAMEBUFFERS_CREATED;
 		return APP_SUCCESS;
 	}
@@ -1467,7 +1593,7 @@ template <template<class> class AllocTemplate>
 
 		uint32_t memoryTypeIndices[2];
 		if (checkMemoryRequirements(bufferMemoryRequirements[0], static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), &memoryTypeIndices[0]) != APP_SUCCESS
-			|| checkMemoryRequirements(bufferMemoryRequirements[1], static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), &memoryTypeIndices[1]) != APP_SUCCESS)
+			|| checkMemoryRequirements(bufferMemoryRequirements[1], static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT /*| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT*/), &memoryTypeIndices[1]) != APP_SUCCESS)
 		{
 			fprintf(stderr, "couldn't find any suitable memory type for staging, index or vertex buffer!\n");
 			m_progressStatus &= ~VERTEX_INPUT_BOUND;
@@ -1526,7 +1652,7 @@ template <template<class> class AllocTemplate>
 			.offset = 0,
 			.size = VK_WHOLE_SIZE
 		};
-		// vkFlushMappedMemoryRanges(m_device, /*memory range count*/1, &memoryRange);
+		vkFlushMappedMemoryRanges(m_device, /*memory range count*/1, &memoryRange);
 
 		vkUnmapMemory(m_device, m_stagingBufferMemory);
 		
@@ -1601,10 +1727,19 @@ template <template<class> class AllocTemplate>
 			.pSignalSemaphores = nullptr
 		};
 
-		uint32_t queue = static_cast<uint32_t>(m_queueIdx.graphics);
-		vkQueueSubmit(m_queues[0], /*submit count*/1, &submitInfo, /*fence to signal when finished*/VK_NULL_HANDLE);
-		vkQueueWaitIdle(m_queues[0]); // TODO remove
+		// Why is it so much slower with fence?
+		//VkFence fence;
+		//VkFenceCreateInfo const fenceCreateInfo {
+		//	.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+		//	.flags = 0
+		//};
+		//res = vkCreateFence(m_device, &fenceCreateInfo, /*VkAllocationCallbacks**/nullptr, &fence);
 
+		vkQueueSubmit(m_queues[0], /*submit count*/1, &submitInfo, /*fence to signal when finished*/VK_NULL_HANDLE);
+		vkQueueWaitIdle(m_queues[0]);
+		//vkWaitForFences(m_device, /*fences count*/1, &fence, /*wait all?*/VK_TRUE, /*timeout in ns*/0xffffffff);
+
+		//vkDestroyFence(m_device, fence, /*VkAllocationCallbacks**/nullptr);
 		vkFreeCommandBuffers(m_device, m_graphicsCmdPool, copyCommandBufferCreateInfo.commandBufferCount, &copyCommandBuffer);
 		
 		printf("vertex input set up!\n");
@@ -1612,9 +1747,259 @@ template <template<class> class AllocTemplate>
 		return APP_SUCCESS;
 	}
 
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupDescriptorSets(Eigen::Transform<float,3,Eigen::Affine> const& affineTransform) & -> status_t
+	{
+		assert(m_progressStatus & DEVICE_CREATED);
+		assert(sizeof(affineTransform.matrix()) == 16 * sizeof(float));
+
+		m_descriptorSets.resize(m_swapchainImages.size());
+		m_descriptorBuffers.resize(m_swapchainImages.size());
+
+		// -- create the descriptor set layout -------------------------------------------------------------------------------------------
+		m_descriptorSetLayouts.resize(1); // TODO hardcoded
+		VkDescriptorSetLayoutBinding const descriptorSetLayoutBindings[] {
+			{
+				.binding = 0, // binding number in shader ([[vk::binding(0)]]) 
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+				.pImmutableSamplers = nullptr // only for descriptors of the sampler type
+			}
+		};
+
+		VkDescriptorSetLayoutCreateInfo const descriptorSetLayoutCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.bindingCount = 1,
+			.pBindings = descriptorSetLayoutBindings
+		};
+		VkResult res = vkCreateDescriptorSetLayout(m_device, &descriptorSetLayoutCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_descriptorSetLayouts[0]); // fails only if out of memory
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to Create a descriptor set layout!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		// -- create descriptor pool ---------------------------------------------------------------------------------------------------
+		VkDescriptorPoolSize const descriptorPoolSizes[] {
+			{
+				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1
+			}
+		};
+
+		VkDescriptorPoolCreateInfo const descriptorPoolCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.maxSets = static_cast<uint32_t>(m_descriptorSets.size()), // TODO extract all hard coded numbers from this function, specifies how many descriptor sets can be allocated in here
+			.poolSizeCount = 1, // the pool sizes specify the size of the pool by describing a "nominal layout", i.e. max workload layout (?)
+			.pPoolSizes = descriptorPoolSizes
+		};
+		
+		res = vkCreateDescriptorPool(m_device, &descriptorPoolCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_descriptorPool);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to create a descriptor pool!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		// -- allocate descriptor set from descriptor pool --------------------------------------------------------------------------------
+		VectorCustom<VkDescriptorSetLayout> setLayouts(m_descriptorSets.size(), m_descriptorSetLayouts[0]);
+		
+		VkDescriptorSetAllocateInfo const descriptorSetAllocateInfo {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			.pNext = nullptr,
+			.descriptorPool = m_descriptorPool,
+			.descriptorSetCount = static_cast<uint32_t>(m_descriptorSets.size()),
+			.pSetLayouts = setLayouts.data() // there is a 1:1 relationship between layouts and sets, even if duplicates
+		};
+		res = vkAllocateDescriptorSets(m_device, &descriptorSetAllocateInfo, m_descriptorSets.data());
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to allocate a descriptor sets!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		// -- create buffer and its associated memory to physically hold the tranform data --------------------------------------------------------
+		// create buffer object
+		VkBufferCreateInfo const bufferCreateInfo {
+			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.size = sizeof(affineTransform.matrix()), // 16 * sizeof(float); // TODO 
+			.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+			.queueFamilyIndexCount = 1,
+			.pQueueFamilyIndices = nullptr
+		};
+
+		printf("about to create uniform buffers!\n");
+		for (uint32_t i = 0; i < m_descriptorBuffers.size(); ++i)
+		{
+			res = vkCreateBuffer(m_device, &bufferCreateInfo, /*VkAllocationCallbacks*/nullptr, &m_descriptorBuffers[i]);
+			if (res != VK_SUCCESS)
+			{
+				fprintf(stderr, "failed to create descriptor buffer!\n");
+				return APP_GENERIC_ERR;
+			}
+		}
+
+		// allocate the memory for the buffer objects
+		printf("about to allocate memory for uniform buffers!\n");
+		VkMemoryRequirements memoryRequirements;
+		printf("here is the seg fault!\n");
+		vkGetBufferMemoryRequirements(m_device, m_descriptorBuffers[0], &memoryRequirements);
+		printf("here is the seg fault!\n");
+		m_uniformBufferSize = memoryRequirements.size;
+		memoryRequirements.size *= m_descriptorBuffers.size();
+		uint32_t memoryTypeIndex;
+		printf("here is the seg fault!\n");
+		if (checkMemoryRequirements(memoryRequirements, static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), &memoryTypeIndex) != APP_SUCCESS)
+		{
+			fprintf(stderr, "couldn't find any suitable memory type to allocate descriptor buffer!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		VkMemoryAllocateInfo const allocateInfo {
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.pNext = nullptr,
+			.allocationSize = memoryRequirements.size,
+			.memoryTypeIndex = memoryTypeIndex
+		};
+
+		res = vkAllocateMemory(m_device, &allocateInfo, /*VkAllocationCallbacks**/nullptr, &m_descriptorsBufferMemory);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to allocate memory for descriptor buffer!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		printf("about to bind memory for uniform buffers!\n");
+		// bind buffer objects to underlying memory
+		for (uint32_t i = 0; i < m_descriptorBuffers.size(); ++i)
+		{
+			res = vkBindBufferMemory(m_device, m_descriptorBuffers[i], m_descriptorsBufferMemory, /*offset*/i*m_uniformBufferSize);
+			if (res != VK_SUCCESS)
+			{
+				fprintf(stderr, "failed to bind descriptor buffer to its underlying memory!\n");
+				return APP_GENERIC_ERR;
+			}
+		}
+
+		// map device memory to some region of system memory and transfer data
+		printf("about to map memory!\n");
+		res = vkMapMemory(m_device, m_descriptorsBufferMemory, /*offset*/0, VK_WHOLE_SIZE, /*flags*/0, &m_descriptorBuffersMemoryMappedPtr);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to map memory for descriptor!\n");
+			return APP_GENERIC_ERR;
+		}
+		
+		for (uint32_t i = 0; i < m_descriptorBuffers.size(); ++i)
+		{
+			memcpy(reinterpret_cast<unsigned char*>(m_descriptorBuffersMemoryMappedPtr) + i*sizeof(affineTransform.matrix()),
+					affineTransform.data(), 
+					m_uniformBufferSize); // hope size works
+		}
+
+		VkMappedMemoryRange const memoryRange { // TODO refactor, duplicated in updateUniformBuffers, setupVertexInput
+			.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,	
+			.pNext = nullptr, 
+			.memory = m_descriptorsBufferMemory,
+			.offset = 0,
+			.size = VK_WHOLE_SIZE
+		};
+
+		res = vkFlushMappedMemoryRanges(m_device, /*memoryRangeCount*/1, &memoryRange);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to flush memory range!\n");
+			return APP_GENERIC_ERR;
+		}
+	
+		vkUnmapMemory(m_device, m_descriptorsBufferMemory);
+
+		// done at destruction
+		// vkUnmapMemory(m_device, m_descriptorsBufferMemory);
+
+		// -- update descriptor set with transform data from buffer -----------------------------------------------------------------------------------
+		VectorCustom<VkDescriptorBufferInfo> descriptorBufferInfos(
+			m_descriptorBuffers.size(), 
+			{.buffer = VK_NULL_HANDLE,
+			.offset = 0,
+			.range = VK_WHOLE_SIZE}
+		);
+		
+		// structure describing the write operation we need to perform on a descriptor set
+		VectorCustom<VkWriteDescriptorSet> descriptorWrites {
+			m_descriptorBuffers.size(), // count
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.pNext = nullptr,
+				.dstSet = nullptr,//m_descriptorSets[i], // destination descriptor set to update
+				.dstBinding = 0, // the binding within the descriptor set to update
+				.dstArrayElement = 0, // the first element within the binding to update. It is the number of elements in pBufferInfo (unless type is INLINE_UNIFORM_BLOCK, in which case it is the size in bytes of the block)
+				.descriptorCount = 1, // the number of descriptors in the binding from the set first array element
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.pImageInfo = nullptr, // relevant only if data comes from an image
+				.pBufferInfo = nullptr,// descriptorBufferInfos, // number of descriptor buffer info matches the number of descriptors, even if there are clones
+				.pTexelBufferView = nullptr // relevant only if data comes from a texel buffer
+			}
+		};
+
+		for (uint32_t i = 0; i < m_descriptorBuffers.size(); ++i)
+		{
+			descriptorBufferInfos[i].buffer = m_descriptorBuffers[i];
+
+			descriptorWrites[i].dstSet = m_descriptorSets[i];
+			descriptorWrites[i].pBufferInfo = &descriptorBufferInfos[i];
+		};
+		
+		// function used both to copy data from another descriptor OR to write a descriptor with fresh data either from a buffer, or from an image, or from a texel buffer
+		vkUpdateDescriptorSets(m_device, descriptorWrites.size(), descriptorWrites.data(), /*descriptorCopyCount*/0, /*pDescriptorCopies*/nullptr);
+
+		m_progressStatus |= DESCRIPTOR_SETS_SETUP;
+		return APP_SUCCESS;
+	}
+
+	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::updateUniformBuffer(uint32_t framebufferIdx) -> status_t
+	{
+		VkResult res = vkMapMemory(m_device, m_descriptorsBufferMemory, /*offset*/0, VK_WHOLE_SIZE, /*flags*/0, &m_descriptorBuffersMemoryMappedPtr);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to map memory for descriptor!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		memcpy(reinterpret_cast<unsigned char*>(m_descriptorBuffersMemoryMappedPtr) + framebufferIdx*sizeof(m_transform.matrix()),
+				m_transform.data(), 
+				m_uniformBufferSize);
+
+		VkMappedMemoryRange const memoryRange {
+			.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,	
+			.pNext = nullptr, 
+			.memory = m_descriptorsBufferMemory,
+			.offset = static_cast<VkDeviceSize>(framebufferIdx * sizeof(m_transform.matrix())),
+			.size = static_cast<VkDeviceSize>(sizeof(m_transform.matrix()))
+		};
+
+		res = vkFlushMappedMemoryRanges(m_device, /*memoryRangeCount*/1, &memoryRange);
+		if (res != VK_SUCCESS)
+		{
+			fprintf(stderr, "failed to flush memory range!\n");
+			return APP_GENERIC_ERR;
+		}
+
+		vkUnmapMemory(m_device, m_descriptorsBufferMemory);
+		
+		return APP_SUCCESS;
+	}
+
 	template <template<class> class AllocTemplate> auto Renderer<AllocTemplate>::setupGraphicsPipeline() & -> status_t
 	{
-		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
+		assert(m_progressStatus & (FRAMEBUFFERS_CREATED | RENDERPASS_CREATED | VERTEX_INPUT_BOUND | DESCRIPTOR_SETS_SETUP) && "graphics pipeline creation requires a renderpass and framebuffers!\n");
 
 		// creation of all information about pipeline steps: layout, and then in order of execution
 		// -- pipeline layout TODO update when adding descriptor sets --------------------------------------------------------------------------------------------------------------
@@ -1622,8 +2007,8 @@ template <template<class> class AllocTemplate>
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 			.pNext = nullptr,
 			.flags = 0, // there is only 1 and requires an extension
-			.setLayoutCount = 0, // TODO change, number of descriptor sets to include in the pipeline layout
-			.pSetLayouts = nullptr, // TODO change, pointer to array of VkDescriptorSetLayout objects
+			.setLayoutCount = static_cast<uint32_t>(m_descriptorSetLayouts.size()), // TODO change, number of descriptor sets to include in the pipeline layout
+			.pSetLayouts = m_descriptorSetLayouts.data(), // TODO change, pointer to array of VkDescriptorSetLayout objects
 			.pushConstantRangeCount = 0, // TODO change, number to push constant ranges (range = a part of push constant)
 			.pPushConstantRanges = nullptr // TODO change
 		};
@@ -1660,7 +2045,7 @@ template <template<class> class AllocTemplate>
 		shaderStreams[0].read(shadersBuf[0].data(), shaderSizes[0]);
 		shaderStreams[1].read(shadersBuf[1].data(), shaderSizes[1]);
 
-		printf("vector sizes are %u and %u\n", shadersBuf[0].size(), shadersBuf[1].size());
+		printf("vector sizes are %lu and %lu\n", shadersBuf[0].size(), shadersBuf[1].size());
 		assert(shadersBuf[0].size() != 0 && shadersBuf[1].size() != 0);
 
 		VkShaderModuleCreateInfo const shaderModuleCreateInfos[MXC_RENDERER_SHADERS_COUNT] {
@@ -1779,6 +2164,7 @@ template <template<class> class AllocTemplate>
 			.pMultisampleState = &graphicsPipelineConfig.multisampleStateCI,
 			.pDepthStencilState = &graphicsPipelineConfig.depthStencilStateCI,
 			.pColorBlendState = &graphicsPipelineConfig.colorBlendStateCI,
+			.pDynamicState = &graphicsPipelineConfig.dynamicStateCI,
 			.layout = m_graphicsPipelineLayout,
 			.renderPass = m_renderPass,
 			.subpass = 0, // subpass index in the renderpass. A pipeline will execute 1 subpass only.
@@ -1833,7 +2219,7 @@ template <template<class> class AllocTemplate>
 			.flags = 0 // none for now
 		};
 
-		uint16_t created[m_swapchainImages.size()] = {};
+		VectorCustom<uint16_t> created(m_swapchainImages.size());
 		VkResult res;
 		for (uint32_t i = 0u; i < m_swapchainImages.size(); ++i)
 		{
@@ -1841,10 +2227,10 @@ template <template<class> class AllocTemplate>
 			if (res != VK_SUCCESS)
 			++created[0];
 			res = vkCreateSemaphore(m_device, &semaphoreCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_semaphoreImageAvailable[i]);
-			if (res != VK_SUCCESS) break;
+			if (res != VK_SUCCESS) 
 			++created[1];
 			res = vkCreateSemaphore(m_device, &semaphoreCreateInfo, /*VkAllocationCallbacks**/nullptr, &m_semaphoreRenderFinished[i]);
-			if (res != VK_SUCCESS) break;
+			if (res != VK_SUCCESS) 
 			++created[2];
 		}
 
@@ -1931,6 +2317,17 @@ template <template<class> class AllocTemplate>
 				vkCmdSetViewport(m_graphicsCmdBufs[framebufferIdx], 0/*1st viewport*/, 1/*viewport count*/, &viewport);
 				vkCmdSetScissor(m_graphicsCmdBufs[framebufferIdx], 0/*1st scissor*/, 1/*scissor count*/, &scissor);
 
+				// bind descriptor sets (todo instead of data use framebufferIndex)
+				vkCmdBindDescriptorSets(
+					m_graphicsCmdBufs[framebufferIdx], 
+					VK_PIPELINE_BIND_POINT_GRAPHICS, // pipeline bind point. tells vulkan the type of the pipeline that will use the descriptor set
+					m_graphicsPipelineLayout, 
+					0, // first set number. You can bind descriptor sets to arbitrary numbers
+					1, // set count
+					&m_descriptorSets[framebufferIdx], 
+					0, // dynamicOffsetcount and dynamicOffsets pointer. If any of the sets being bound has at least 1 descriptor of type UNIFORM_DYNAMIC, then offsetCount = number of such descriptors being bound, and each of the offsets will be used to access buffer 
+					nullptr);
+			
 				// draw command. TODO refactor hardcoded numbers
 				// vkCmdDraw(m_graphicsCmdBufs[framebufferIdx], /*vertexCount*/3, /*instance count*/1, /*firstVertexID*/0, /*firstInstanceID*/0); // vertex count == how many times to call the vertex shader != how many vertices we have stored in a buffer, instance count == number of times to draw the same primitives
 				vkCmdDrawIndexed(m_graphicsCmdBufs[framebufferIdx], /*indexCount*/3, /*instanceCount*/1, /*firstIndexID*/0, /*vertexOffset*/0, /*firstInstance*/0);
@@ -1976,6 +2373,9 @@ template <template<class> class AllocTemplate>
 			return APP_GENERIC_ERR;
 		}
 		
+		// TODO move updateUniformBuffer to be handled by events
+		// updateUniformBuffer(currentFramebuffer);
+		
 		recordCommands(currentFramebuffer);
 
 		VkPipelineStageFlags const pipelineSemaphoreStageFlags[] {
@@ -1998,12 +2398,7 @@ template <template<class> class AllocTemplate>
 		if (res != VK_SUCCESS)
 		{
 			fprintf(stderr, "failed submitting draw operation!\n");
-			switch (res)
-			{
-				case VK_ERROR_OUT_OF_HOST_MEMORY: fprintf(stderr, "VK_ERROR_OUT_OF_HOST_MEMORY\n"); break;
-				case VK_ERROR_OUT_OF_DEVICE_MEMORY: fprintf(stderr, "VK_ERROR_OUT_OF_DEVICE_MEMORY\n"); break;
-				case VK_ERROR_DEVICE_LOST: fprintf(stderr, "VK_ERROR_DEVICE_LOST\n"); break;
-			}
+			printVkResultValue(res);
 			return APP_GENERIC_ERR;
 		}
 
@@ -2076,6 +2471,7 @@ template <template<class> class AllocTemplate>
 	auto Renderer<AllocTemplate>::progress_incomplete() const & -> status_t 
 	{
 		status_t const status = m_progressStatus ^ (
+			DESCRIPTOR_SETS_SETUP |
 			VERTEX_INPUT_BOUND |
 			SYNCHRONIZATION_OBJECTS_CREATED |
 			GRAPHICS_PIPELINE_CREATED | 
@@ -2143,7 +2539,7 @@ template <template<class> class AllocTemplate>
 	auto app::framebufferResizeCallbackGLFW(GLFWwindow* window, int32_t width, int32_t height) -> void
 	{
 		// while the window is minimized, wait
-		while (width == 0 | height == 0)
+		while (width == 0 || height == 0)
 		{
 			glfwWaitEvents();
 		}
@@ -2151,7 +2547,7 @@ template <template<class> class AllocTemplate>
 		renderer->resize(width, height);
 	}
 
-	auto app::errorCallbackGLFW(int errCode, char const * errMsg) -> void
+	auto app::errorCallbackGLFW(int errCode, [[maybe_unused]] char const * errMsg) -> void
 	{
 		switch (errCode)
 		{
@@ -2179,18 +2575,6 @@ template <template<class> class AllocTemplate>
 	auto app::init() -> status_t
 	{
 		glfwSetErrorCallback(reinterpret_cast<GLFWerrorfun>(errorCallbackGLFW));
-		// TODO refactor all in a big if statement, eg.:
-		// if (  operation1
-		//    && operation2
-		//    && operation3 ...
-		// 	  )
-		// {
-		//     return APP_SUCCESS;
-		// }
-		// else
-		// {
-		//     return APP_GENERIC_ERR;
-		// }
 		// try to initialize the glfw library and see if you can find eligeable vulkan drivers
 		if (glfwInit() == GLFW_FALSE)
 		{
@@ -2232,7 +2616,6 @@ template <template<class> class AllocTemplate>
 
 		/**NOTE:
 		 * when using OpenGL/OpenGL_ES, GLFW windows will also have a OpenGL context, because OpenGL is more tightly coupled to the platform specific windowing system (whose creation we disabled with
-		 * 
 		 * GLFW_NO_API above). When managing more windows, with their set of context (shared or exclusive), there are some functions which require to know, which window is being used, a.k.a. which is 
 		 * the "current context", example when swapping buffers. Since we are using Vulkan, we'll do none of that and instead use the KHR extension WSI, to interface with the windowing system
 		 */
@@ -2262,11 +2645,13 @@ template <template<class> class AllocTemplate>
 		std::vector<uint32_t, Mallocator<uint32_t>> indexInput {
 			0, 1, 2
 		};
+		auto transform {Eigen::Transform<float,3,Eigen::Affine>::Identity()};
+		transform.translate(Eigen::Vector3f(-.4f, -.4f, 0.f));
 
 		if (m_renderer.init(std::span(desiredInstanceExtensions.begin(), desiredInstanceExtensions.end()), 
 							std::span(desiredDeviceExtensions.begin(), desiredDeviceExtensions.end()), m_window, 
 							WINDOW_WIDTH, WINDOW_HEIGHT,
-							vertexInput, indexInput) == APP_GENERIC_ERR)
+							vertexInput, indexInput, transform) == APP_GENERIC_ERR)
 		{
 			return APP_GENERIC_ERR;
 		}
@@ -2332,15 +2717,17 @@ template <template<class> class AllocTemplate>
 		// implementing conditional destruction of state with switch fallthrough
 		switch (m_progressStatus)
 		{
-			case m_Progress_t::GLFW_INITIALIZED | m_Progress_t::GLFW_WINDOW_CREATED: 
+			case GLFW_WINDOW_CREATED: 
 				glfwDestroyWindow(m_window);
-			case m_Progress_t::GLFW_INITIALIZED:
+				[[fallthrough]];
+			case GLFW_INITIALIZED:
 				glfwTerminate();
+				break;
 		}
 	}
 }
 
-auto main(int32_t argc, char* argv[]) -> int
+auto main([[maybe_unused]] int32_t argc, [[maybe_unused]] char* argv[]) -> int32_t
 {
 	mxc::app app_instance;
 	app_instance.init();

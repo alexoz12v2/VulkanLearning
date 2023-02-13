@@ -1,4 +1,3 @@
-
 setup extensions, validation layers, and script to get all todos
 build/*
 vkspec.pdf
@@ -7,3 +6,6 @@ rimuovere vulkan loader che lo ho *
 notes
 a Vulkan instance *
 __*
+.cache/*
+compile_commands.json
+ext_and_layers_names.txt
